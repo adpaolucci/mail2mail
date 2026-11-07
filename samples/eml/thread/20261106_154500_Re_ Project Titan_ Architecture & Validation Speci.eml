@@ -1,0 +1,11 @@
+From: Marcus Brody <m.brody@titan.corp>
+To: Dr. Evelyn Vance <evelyn.vance@titan.corp>
+Subject: Re: Project Titan: Architecture & Validation Specification
+In-Reply-To: <spec-titan-001@mail2rust.local>
+Date: Fri, 06 Nov 2026 15:45:00 +0000
+Message-ID: <spec-titan-002@mail2rust.local>
+Content-Type: text/plain; charset=utf-8
+
+Evelyn,
+
+The new pure-Rust PST writer creates valid NDB headers.

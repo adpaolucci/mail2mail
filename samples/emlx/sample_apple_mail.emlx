@@ -1,0 +1,18 @@
+368
+From: Dr. Evelyn Vance <evelyn.vance@titan.corp>
+To: Anthony Paolucci <adpaolucci@gmail.com>
+Subject: Apple Mail EMLX Spec Verification
+Date: Fri, 06 Nov 2026 14:30:00 +0000
+Message-ID: <apple-mail-emlx-001@mail2rust.local>
+Content-Type: text/plain; charset=utf-8
+
+This is a native Apple Mail .emlx message containing a byte-count header and XML plist metadata.<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>flags</key>
+    <integer>8623489153</integer>
+    <key>read</key>
+    <true/>
+</dict>
+</plist>

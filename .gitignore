@@ -218,3 +218,6 @@ srcconvo.pdf
 *.emlx
 *.babyl
 *.mmdf
+
+# Keep sample files
+!samples/**
