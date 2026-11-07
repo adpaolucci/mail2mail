@@ -302,6 +302,43 @@ class TestMail2PstAndPstReader(unittest.TestCase):
         parts = list(mail2pst._walk_outer_parts(top))
         self.assertGreater(len(parts), 1)
 
+    def test_oversized_attachment_handling(self):
+        """Verify that Outlook's 4096 'bigger than the server allows' exception is caught gracefully."""
+        from email.message import EmailMessage
+        msg = EmailMessage()
+        msg["From"] = "sender@example.com"
+        msg["To"] = "recipient@example.com"
+        msg["Subject"] = "Oversized Attachment Test"
+        msg.set_content("Body text with oversized attachment")
+        msg.add_attachment(b"X" * 1024, maintype="application", subtype="zip", filename="huge_archive.zip")
+
+        class MockMailItem:
+            def __init__(self):
+                self.Subject = ""
+                self.Body = ""
+                self.HTMLBody = None
+                self.PropertyAccessor = self
+                self.props = {}
+            def SetProperty(self, k, v):
+                self.props[k] = v
+            def Save(self):
+                pass
+            class Attachments:
+                @staticmethod
+                def Add(path, t, p, disp):
+                    # Simulate Outlook COM error 4096
+                    raise Exception("(-2147352567, 'Exception occurred.', (4096, 'Microsoft Outlook', "
+                                    "\"The file you're attaching is bigger than the server allows. "
+                                    "Try putting the file in a shared location and sending a link instead.\", "
+                                    "None, 0, -2147467259), None)")
+
+        mock_item = MockMailItem()
+        with tempfile.TemporaryDirectory() as td:
+            mail2pst.populate_mailitem(mock_item, msg, msg.as_bytes(), td)
+
+        self.assertIn("huge_archive.zip", mock_item.Body)
+        self.assertIn("MaximumAttachmentSize", mock_item.Body)
+
 
 class TestMail2MailRouter(unittest.TestCase):
     """Test mail2mail._infer_mode CLI routing across subcommands, flags, and file extensions."""

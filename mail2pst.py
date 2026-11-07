@@ -269,7 +269,39 @@ def pick_body(msg) -> Tuple[Optional[str], Optional[str], Set[int]]:
     return html, text, body_parts
 
 
-def add_attachments(mail, msg, tmpdir: str, body_parts: Optional[Set[int]] = None) -> Tuple[int, bool]:
+def check_or_lift_outlook_attachment_limit() -> None:
+    """
+    Check if Outlook's MaximumAttachmentSize registry key is set to 0 (unlimited).
+    Attempts to set it to 0 in HKCU if missing or non-zero, preventing
+    'The file you're attaching is bigger than the server allows' COM errors.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+        for ver in ("16.0", "15.0", "14.0"):
+            key_path = f"Software\\Microsoft\\Office\\{ver}\\Outlook\\Preferences"
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
+                    try:
+                        val, _ = winreg.QueryValueEx(k, "MaximumAttachmentSize")
+                        if val != 0:
+                            winreg.SetValueEx(k, "MaximumAttachmentSize", 0, winreg.REG_DWORD, 0)
+                    except FileNotFoundError:
+                        winreg.SetValueEx(k, "MaximumAttachmentSize", 0, winreg.REG_DWORD, 0)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def add_attachments(
+    mail,
+    msg,
+    tmpdir: str,
+    body_parts: Optional[Set[int]] = None,
+    skipped_oversized: Optional[List[Tuple[str, int]]] = None,
+) -> Tuple[int, bool]:
     """
     Save all non-body attachments and inline CID assets to temp files and attach to `mail`.
     Preserves original filenames and links Content-ID for inline HTML images.
@@ -379,7 +411,18 @@ def add_attachments(mail, msg, tmpdir: str, body_parts: Optional[Set[int]] = Non
             del a
             count += 1
         except Exception as e:
-            print(f"\n[WARN] Attachment '{safe_fn}' failed: {e}")
+            err_msg = str(e)
+            if "bigger than the server allows" in err_msg or "4096" in err_msg:
+                sz_mb = len(payload) / (1024 * 1024)
+                if skipped_oversized is not None:
+                    skipped_oversized.append((safe_fn, len(payload)))
+                print(
+                    f"\n[WARN] Attachment '{safe_fn}' ({sz_mb:.1f} MB) exceeds Outlook's server attachment limit.\n"
+                    f"       To lift this limit permanently in Outlook, run in PowerShell:\n"
+                    f"       New-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Office\\16.0\\Outlook\\Preferences' -Name 'MaximumAttachmentSize' -Value 0 -PropertyType DWORD -Force"
+                )
+            else:
+                print(f"\n[WARN] Attachment '{safe_fn}' failed: {e}")
         finally:
             shutil.rmtree(slot_dir, ignore_errors=True)
 
@@ -462,14 +505,26 @@ def populate_mailitem(mail_item, parsed, msg_bytes: bytes, temp_dir: str, flags=
     if is_opaque_smime and html_body is None and text_body is None:
         mail_item.Body = "[S/MIME Encrypted or Opaque-Signed Message - See attached smime.p7m]"
 
-    add_attachments(mail_item, parsed, temp_dir, body_parts=body_parts)
+    oversized: List[Tuple[str, int]] = []
+    add_attachments(mail_item, parsed, temp_dir, body_parts=body_parts, skipped_oversized=oversized)
+
+    oversized_note = ""
+    if oversized:
+        items_str = "\n".join(f" - {fn} ({sz / (1024*1024):.1f} MB)" for fn, sz in oversized)
+        oversized_note = (
+            f"\n\n[mail2pst Note: The following attachment(s) could not be embedded because Outlook's "
+            f"MaximumAttachmentSize server limit was exceeded:\n{items_str}\n"
+            f"To allow large attachments, set MaximumAttachmentSize=0 in HKCU\\Software\\Microsoft\\Office\\16.0\\Outlook\\Preferences]"
+        )
 
     if html_body is not None:
+        if oversized_note:
+            html_body += f"<br><br><pre style='color:#b00;font-size:12px;'>{oversized_note.strip()}</pre>"
         mail_item.HTMLBody = html_body
     elif text_body is not None:
-        mail_item.Body = text_body
+        mail_item.Body = text_body + oversized_note
     elif not is_opaque_smime:
-        mail_item.Body = ""
+        mail_item.Body = oversized_note.strip()
 
     # 3. Read / Flagged / Replied / Forwarded states
     if flags is None:
@@ -892,6 +947,8 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
     if not HAS_PYWIN32:
         print("Error: pywin32 is not installed. Run:  pip install pywin32", file=sys.stderr)
         sys.exit(1)
+
+    check_or_lift_outlook_attachment_limit()
 
     src = args.src_opt or args.src_pos
     target = args.out_pst or args.out_dir or args.out_pos

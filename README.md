@@ -54,6 +54,11 @@ pip install -e .
 1. Ensure classic desktop Outlook has a default mail profile configured that opens without modal prompts.
 2. Put Outlook in **Work Offline** mode while running large imports.
 3. Avoid browsing or moving items inside the target `.pst` in Outlook while the import is active.
+4. **Remove Outlook's 20 MB / 25 MB Attachment Size Limit**: By default, Outlook desktop rejects attaching files larger than 20–25 MB with error `(4096, "The file you're attaching is bigger than the server allows...")`. To lift this limit and allow unlimited attachment sizes in Outlook, run in PowerShell:
+   ```powershell
+   New-ItemProperty -Path "HKCU:\Software\Microsoft\Office\16.0\Outlook\Preferences" -Name "MaximumAttachmentSize" -Value 0 -PropertyType DWORD -Force
+   ```
+   *(Replace `16.0` with `15.0` for Outlook 2013 or `14.0` for Outlook 2010).*
 
 ---
 
