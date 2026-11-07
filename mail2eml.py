@@ -293,8 +293,8 @@ def build_arg_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
     ap.add_argument(
         "--layout",
         choices=["folder", "year", "month", "flat"],
-        default=None,
-        help="Output directory layout (default: 'folder' for positional/hierarchy, 'year' when --mbox is used)",
+        default="folder",
+        help="Output directory layout: 'folder' (1:1 folder hierarchy), 'year' (YYYY), 'month' (YYYY/MM), or 'flat' (default: folder)",
     )
     ap.add_argument(
         "--naming",
@@ -348,9 +348,7 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
 
     out_root = os.path.normpath(out_dir)
 
-    layout = args.layout
-    if layout is None:
-        layout = "year" if (args.src_opt and not args.src_pos) else "folder"
+    layout = args.layout or "folder"
 
     logger = AuditLogger(
         audit_log_path=args.audit_log,
