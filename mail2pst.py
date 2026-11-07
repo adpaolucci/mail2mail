@@ -61,6 +61,7 @@ from mail_formats import (
     decode_imap_utf7,
     decode_mime_words,
     decode_modified_utf7,
+    extract_attachment_filename,
     extract_best_datetime,
     extract_message_flags,
     iter_mail_records,
@@ -96,6 +97,16 @@ PR_SENT_REPRESENTING_ADDRTYPE_W = MAPI_PROPTAG_BASE + "0x0064001F"
 # Timestamps (PT_SYSTIME = 0040)
 PR_CLIENT_SUBMIT_TIME          = MAPI_PROPTAG_BASE + "0x00390040"
 PR_MESSAGE_DELIVERY_TIME       = MAPI_PROPTAG_BASE + "0x0E060040"
+PR_CREATION_TIME               = MAPI_PROPTAG_BASE + "0x30070040"
+PR_LAST_MODIFICATION_TIME      = MAPI_PROPTAG_BASE + "0x30080040"
+
+# Message Flags (PT_LONG = 0003)
+PR_MESSAGE_FLAGS               = MAPI_PROPTAG_BASE + "0x0E070003"
+MSGFLAG_READ                   = 0x00000001
+MSGFLAG_UNMODIFIED             = 0x00000002
+MSGFLAG_SUBMIT                 = 0x00000004
+MSGFLAG_UNSENT                 = 0x00000008
+MSGFLAG_HASATTACH              = 0x00000010
 
 # Inline HTML Attachment properties
 PR_ATTACH_CONTENT_ID_W         = MAPI_PROPTAG_BASE + "0x3712001F"
@@ -247,10 +258,7 @@ def pick_body(msg) -> Tuple[Optional[str], Optional[str], Set[int]]:
         for part in _walk_outer_parts(msg):
             ctype = part.get_content_type()
             disp = safe_get_header(part, "Content-Disposition", "").lower()
-            try:
-                fn = part.get_filename()
-            except Exception:
-                fn = None
+            fn = extract_attachment_filename(part)
             if "attachment" in disp or fn:
                 continue
             if ctype == "text/html" and html is None:
@@ -327,10 +335,7 @@ def add_attachments(
         ctype = part.get_content_type()
         disp = safe_get_header(part, "Content-Disposition", "").lower()
         cid = safe_get_header(part, "Content-ID", "") or None
-        try:
-            fn = part.get_filename()
-        except Exception:
-            fn = None
+        fn = extract_attachment_filename(part)
 
         if ctype in ("application/pgp-signature", "application/pkcs7-signature", "application/x-pkcs7-signature"):
             if not fn:
@@ -508,7 +513,7 @@ def populate_mailitem(mail_item, parsed, msg_bytes: bytes, temp_dir: str, flags=
         mail_item.Body = "[S/MIME Encrypted or Opaque-Signed Message - See attached smime.p7m]"
 
     oversized: List[Tuple[str, int]] = []
-    add_attachments(mail_item, parsed, temp_dir, body_parts=body_parts, skipped_oversized=oversized)
+    att_count, _ = add_attachments(mail_item, parsed, temp_dir, body_parts=body_parts, skipped_oversized=oversized)
 
     oversized_note = ""
     if oversized:
@@ -528,10 +533,10 @@ def populate_mailitem(mail_item, parsed, msg_bytes: bytes, temp_dir: str, flags=
     elif not is_opaque_smime:
         mail_item.Body = oversized_note.strip()
 
-    # 3. Read / Flagged / Replied / Forwarded states
+    # 3. Read / Flagged / Replied / Forwarded / Draft states
     if flags is None:
         flags = extract_message_flags(parsed)
-    is_read, is_flagged, is_replied, is_forwarded, _ = flags
+    is_read, is_flagged, is_replied, is_forwarded, is_draft = flags
 
     try:
         mail_item.UnRead = not is_read
@@ -564,8 +569,37 @@ def populate_mailitem(mail_item, parsed, msg_bytes: bytes, temp_dir: str, flags=
             utc_dt = to_mapi_utc(pa, dt)
             set_prop(pa, PR_MESSAGE_DELIVERY_TIME, utc_dt)
             set_prop(pa, PR_CLIENT_SUBMIT_TIME, utc_dt)
+            set_prop(pa, PR_CREATION_TIME, utc_dt)
+            set_prop(pa, PR_LAST_MODIFICATION_TIME, utc_dt)
+            try:
+                mail_item.SentOn = utc_dt
+            except Exception:
+                pass
         except Exception:
             pass
+
+    # 5. MAPI Message Flags (clear MSGFLAG_UNSENT for received/sent mail so Outlook
+    # does not treat them as drafts or override the received date with the import date)
+    try:
+        raw_msg_flags = pa.GetProperty(PR_MESSAGE_FLAGS)
+        cur_flags = int(raw_msg_flags)
+    except Exception:
+        cur_flags = 0
+
+    if not is_draft:
+        cur_flags = cur_flags & ~MSGFLAG_UNSENT & ~MSGFLAG_SUBMIT
+    else:
+        cur_flags |= MSGFLAG_UNSENT
+
+    if is_read:
+        cur_flags |= MSGFLAG_READ
+    else:
+        cur_flags &= ~MSGFLAG_READ
+
+    if att_count > 0:
+        cur_flags |= MSGFLAG_HASATTACH
+
+    set_prop(pa, PR_MESSAGE_FLAGS, cur_flags)
 
     if is_replied:
         set_prop(pa, PR_LAST_VERB_EXECUTED, 102)
@@ -784,9 +818,11 @@ class PstRouter:
             self.target_bytes = max(1, total_bytes // self.splits)
 
     def _new_path(self, suffix: str) -> str:
-        if self.single_pst_path and suffix == "part1":
+        if self.single_pst_path and (not suffix or suffix == "part1"):
             return self.single_pst_path
-        return os.path.join(self.out_dir, f"{self.base}_{suffix}.pst")
+        if suffix:
+            return os.path.join(self.out_dir, f"{self.base}_{suffix}.pst")
+        return os.path.join(self.out_dir, f"{self.base}.pst")
 
     def _register_open(self, path: str, root) -> None:
         if path and root:
@@ -817,7 +853,8 @@ class PstRouter:
         if self.cur.get("path"):
             self._detach_path(self.cur["path"])
         self.cur["part"] += 1
-        desired = self._new_path(f"part{self.cur['part']}")
+        suffix = "" if self.cur["part"] == 1 else f"part{self.cur['part']}"
+        desired = self._new_path(suffix)
         init_bytes = self._initial_existing_bytes(desired)
         store, root, actual = create_or_attach_pst(self.ns, desired, overwrite=self.overwrite)
         self.cur.update({"store": store, "root": root, "path": actual, "bytes": init_bytes})
@@ -835,7 +872,7 @@ class PstRouter:
     def _ensure_year(self, year: int, incoming: int):
         s = self.year.get(year)
         if s is None:
-            desired = self._new_path(f"{year}_part1")
+            desired = self._new_path(f"{year}")
             init_bytes = self._initial_existing_bytes(desired)
             store, root, actual = create_or_attach_pst(self.ns, desired, overwrite=self.overwrite)
             s = {"path": actual, "store": store, "root": root, "bytes": init_bytes, "part": 1}
@@ -1145,7 +1182,7 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
                     ))
                 continue
 
-            year, _ = pick_year_month(msg)
+            year, _ = pick_year_month(msg, fallback_timestamp=getattr(rec, "file_mtime", None))
 
             if (args.start_year and year < args.start_year) or (args.end_year and year > args.end_year):
                 skipped += 1
@@ -1194,7 +1231,52 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
 
                 if item is None:
                     item = dest.Items.Add(0)
-                    populate_mailitem(item, msg, raw, tmpdir, flags=flags)
+                    try:
+                        populate_mailitem(item, msg, raw, tmpdir, flags=flags)
+                    except Exception as pop_err:
+                        # Zero-Data-Loss Fallback Preservation:
+                        # If complex MIME body/header formatting fails in Outlook COM, preserve the
+                        # original message intact as an attached source file with original timestamps.
+                        logger.warn(
+                            f"Standard MailItem conversion failed for {rec.source_name} ({pop_err}); "
+                            f"preserving raw message as fallback attachment."
+                        )
+                        try:
+                            item.Delete()
+                        except Exception:
+                            pass
+                        item = dest.Items.Add(0)
+                        subj_hdr = safe_get_header(msg, "Subject", "")
+                        clean_subj = subj_hdr or os.path.basename(rec.source_name)
+                        item.Subject = f"[Preserved Mail] {clean_subj}"[:250]
+                        item.Body = (
+                            f"Notice: This message encountered an issue during standard MIME rendering in Outlook COM.\n"
+                            f"Source: {rec.source_name}\n"
+                            f"Error: {pop_err}\n\n"
+                            f"The full, unmodified raw message has been preserved intact as an attachment.\n"
+                        )
+                        fallback_file = os.path.join(tmpdir, f"raw_msg_{processed}.eml")
+                        with open(fallback_file, "wb") as f_fb:
+                            f_fb.write(raw)
+                        item.Attachments.Add(fallback_file, 1, 1, f"original_{processed}.eml")
+                        pa_fb = item.PropertyAccessor
+                        dt = extract_best_datetime(msg, fallback_timestamp=getattr(rec, "file_mtime", None))
+                        if dt is not None:
+                            try:
+                                utc_dt = to_mapi_utc(pa_fb, dt)
+                                set_prop(pa_fb, PR_MESSAGE_DELIVERY_TIME, utc_dt)
+                                set_prop(pa_fb, PR_CLIENT_SUBMIT_TIME, utc_dt)
+                                set_prop(pa_fb, PR_CREATION_TIME, utc_dt)
+                                set_prop(pa_fb, PR_LAST_MODIFICATION_TIME, utc_dt)
+                            except Exception:
+                                pass
+                        set_prop(pa_fb, PR_MESSAGE_FLAGS, 0)
+                        item.Save()
+                        try:
+                            os.remove(fallback_file)
+                        except OSError:
+                            pass
+
                     try:
                         if item.Parent and item.Parent.EntryID != dest.EntryID:
                             moved = item.Move(dest)

@@ -26,6 +26,7 @@ import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from mail_formats import (
+    extract_attachment_filename,
     extract_message_flags,
     iter_mail_records,
     pick_year_month,
@@ -396,7 +397,7 @@ def perform_dry_run(src_path: str, max_attach_mb: float = 25.0) -> None:
                         payload = part.get_payload(decode=True)
                         if payload and len(payload) > int(max_attach_mb * 1024 * 1024):
                             att_mb = len(payload) / (1024 * 1024)
-                            fn = part.get_filename() or "unnamed_attachment.bin"
+                            fn = extract_attachment_filename(part) or "unnamed_attachment.bin"
                             subj = safe_get_header(msg, "Subject", "(no subject)")
                             oversized_attachments.append((fn, att_mb, subj, folder_name))
                     except Exception:

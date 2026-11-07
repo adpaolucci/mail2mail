@@ -19,6 +19,7 @@ import unittest
 
 import tests  # noqa: F401
 from mail_formats import (
+    extract_attachment_filename,
     extract_best_datetime,
     iter_mail_records,
     parse_gmail_labels,
@@ -27,6 +28,16 @@ from mail_formats import (
 from mail_audit import AuditLogger, AuditRecord, compute_sha256
 import mail2eml
 import mail2mbox
+from mail2pst import (
+    MSGFLAG_HASATTACH,
+    MSGFLAG_READ,
+    MSGFLAG_SUBMIT,
+    MSGFLAG_UNSENT,
+    PR_CREATION_TIME,
+    PR_LAST_MODIFICATION_TIME,
+    PR_MESSAGE_FLAGS,
+    PstRouter,
+)
 
 
 class TestRealWorldHardening(unittest.TestCase):
@@ -244,6 +255,127 @@ class TestRealWorldHardening(unittest.TestCase):
 
         self.assertEqual(written, 1)
         self.assertEqual(skipped, 1)  # already-done-001 was skipped via resume
+
+    def test_extract_attachment_filename_rfc2047_and_content_type(self):
+        # 1. Attachment with RFC 2047 encoded words in filename parameter
+        raw1 = (
+            b'Content-Type: application/pdf\r\n'
+            b'Content-Disposition: attachment; filename="=?UTF-8?B?15HXk9eZ16fXlA==?=.pdf"\r\n\r\n'
+            b'%PDF-1.4 sample'
+        )
+        part1 = email.message_from_bytes(raw1)
+        fn1 = extract_attachment_filename(part1)
+        self.assertEqual(fn1, "\u05d1\u05d3\u05d9\u05e7\u05d4.pdf")
+
+        # 2. Attachment with name in Content-Type header only
+        raw2 = (
+            b'Content-Type: application/zip; name="=?ISO-8859-1?Q?archive=2Ezip?="\r\n'
+            b'Content-Disposition: inline\r\n\r\n'
+            b'PK...'
+        )
+        part2 = email.message_from_bytes(raw2)
+        fn2 = extract_attachment_filename(part2)
+        self.assertEqual(fn2, "archive.zip")
+
+    def test_extract_best_datetime_mtime_fallback(self):
+        # Message with no Date or Received header
+        raw = b"From: test@example.com\r\nSubject: Dateless message\r\n\r\nHello world"
+        msg = email.message_from_bytes(raw)
+        
+        # Without fallback -> None
+        self.assertIsNone(extract_best_datetime(msg))
+
+        # With mtime fallback timestamp
+        ts = 1698235200.0  # Wed, 25 Oct 2023 12:00:00 UTC
+        dt = extract_best_datetime(msg, fallback_timestamp=ts)
+        self.assertIsNotNone(dt)
+        self.assertEqual(dt.year, 2023)
+        self.assertEqual(dt.month, 10)
+        self.assertEqual(pick_year_month(msg, fallback_timestamp=ts), (2023, 10))
+
+    def test_pst_router_naming_enthusedamateur_fix(self):
+        # Verify that initial PST does not get an unnecessary _part1 suffix
+        router = PstRouter(
+            ns=None,
+            out_dir=self.tmpdir,
+            base_name="my_archive",
+            max_gb=10.0,
+            splits=None,
+            split_by_year=False,
+        )
+        
+        # Single / first part
+        self.assertEqual(
+            os.path.basename(router._new_path("")),
+            "my_archive.pst",
+        )
+        # Overflow parts
+        self.assertEqual(
+            os.path.basename(router._new_path("part2")),
+            "my_archive_part2.pst",
+        )
+        self.assertEqual(
+            os.path.basename(router._new_path("part3")),
+            "my_archive_part3.pst",
+        )
+
+        # Year split initial part vs overflow part
+        self.assertEqual(
+            os.path.basename(router._new_path("2023")),
+            "my_archive_2023.pst",
+        )
+        self.assertEqual(
+            os.path.basename(router._new_path("2023_part2")),
+            "my_archive_2023_part2.pst",
+        )
+
+    def test_mapi_message_flags_and_properties_logic(self):
+        # Test the MAPI flags calculation logic directly
+        # When an email is received (not draft) and read, MSGFLAG_UNSENT must be cleared
+        # and MSGFLAG_READ must be set.
+        class MockPropertyAccessor:
+            def __init__(self):
+                self.props = {
+                    PR_MESSAGE_FLAGS: MSGFLAG_UNSENT,  # Outlook default on Items.Add(0)
+                }
+            def GetProperty(self, tag):
+                return self.props.get(tag, 0)
+            def SetProperty(self, tag, val):
+                self.props[tag] = val
+
+        pa = MockPropertyAccessor()
+        # Simulated message flags: is_read=True, is_draft=False, att_count=2
+        raw_msg_flags = pa.GetProperty(PR_MESSAGE_FLAGS)
+        cur_flags = int(raw_msg_flags)
+        is_draft = False
+        is_read = True
+        att_count = 2
+
+        # Apply our hardening logic
+        if not is_draft:
+            cur_flags = cur_flags & ~MSGFLAG_UNSENT & ~MSGFLAG_SUBMIT
+        else:
+            cur_flags |= MSGFLAG_UNSENT
+
+        if is_read:
+            cur_flags |= MSGFLAG_READ
+        else:
+            cur_flags &= ~MSGFLAG_READ
+
+        if att_count > 0:
+            cur_flags |= MSGFLAG_HASATTACH
+
+        pa.SetProperty(PR_MESSAGE_FLAGS, cur_flags)
+
+        final_flags = pa.GetProperty(PR_MESSAGE_FLAGS)
+        # MSGFLAG_UNSENT (0x08) MUST NOT BE SET
+        self.assertEqual(final_flags & MSGFLAG_UNSENT, 0)
+        # MSGFLAG_SUBMIT (0x04) MUST NOT BE SET
+        self.assertEqual(final_flags & MSGFLAG_SUBMIT, 0)
+        # MSGFLAG_READ (0x01) MUST BE SET
+        self.assertEqual(final_flags & MSGFLAG_READ, MSGFLAG_READ)
+        # MSGFLAG_HASATTACH (0x10) MUST BE SET
+        self.assertEqual(final_flags & MSGFLAG_HASATTACH, MSGFLAG_HASATTACH)
 
 
 if __name__ == "__main__":

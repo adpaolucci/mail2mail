@@ -234,11 +234,22 @@ def sanitize_name(s: str, default: str = "item", max_len: int = 120) -> str:
 
 
 def decode_mime_words(s) -> str:
-    """Safely decode RFC 2047 encoded-word headers into a clean Unicode string."""
+    """Safely decode RFC 2047 encoded-word headers and parameters into a clean Unicode string."""
     if not s:
         return ""
     try:
-        return str(make_header(decode_header(str(s))))
+        chunks = decode_header(str(s))
+        parts = []
+        for text, encoding in chunks:
+            if isinstance(text, bytes):
+                enc = encoding or "utf-8"
+                try:
+                    parts.append(text.decode(enc, errors="replace"))
+                except (LookupError, UnicodeDecodeError):
+                    parts.append(text.decode("utf-8", errors="replace"))
+            else:
+                parts.append(str(text))
+        return "".join(parts)
     except Exception:
         return str(s)
 
@@ -283,58 +294,89 @@ def safe_get_all_headers(msg, name: str) -> List[str]:
     return out
 
 
-def extract_best_datetime(msg) -> Optional[datetime]:
+def extract_attachment_filename(part) -> Optional[str]:
+    """
+    Safely extract and decode attachment filename, handling RFC 2047 encoded-word
+    parameters, Content-Disposition filename*, and Content-Type name fallback.
+    """
+    fn = None
+    try:
+        fn = part.get_filename()
+    except Exception:
+        pass
+    if not fn:
+        try:
+            fn = part.get_param("name", header="content-type")
+        except Exception:
+            pass
+    if fn:
+        fn = decode_mime_words(fn).strip()
+    return fn or None
+
+
+def extract_best_datetime(
+    msg,
+    fallback_dt: Optional[datetime] = None,
+    fallback_timestamp: Optional[float] = None,
+) -> Optional[datetime]:
     """
     Extract the best RFC 5322 datetime from an email.message.Message:
       1. 'Date' header
       2. 'Resent-Date' header
       3. Date substring after ';' in 'Received' headers (checking newest hops first)
+      4. fallback_dt or fallback_timestamp (e.g. filesystem mtime)
     Returns timezone-aware or naive datetime, or None if completely unparseable.
     """
-    if msg is None:
-        return None
+    if msg is not None:
+        # 1. Direct Date header
+        try:
+            d = safe_get_header(msg, "Date", "").strip()
+            if d:
+                dt = parsedate_to_datetime(d)
+                if dt is not None and 1900 <= dt.year <= 2100:
+                    return dt
+        except Exception:
+            pass
 
-    # 1. Direct Date header
-    try:
-        d = safe_get_header(msg, "Date", "").strip()
-        if d:
-            dt = parsedate_to_datetime(d)
-            if dt is not None and 1900 <= dt.year <= 2100:
-                return dt
-    except Exception:
-        pass
+        # 2. Resent-Date header
+        try:
+            rd = safe_get_header(msg, "Resent-Date", "").strip()
+            if rd:
+                dt = parsedate_to_datetime(rd)
+                if dt is not None and 1900 <= dt.year <= 2100:
+                    return dt
+        except Exception:
+            pass
 
-    # 2. Resent-Date header
-    try:
-        rd = safe_get_header(msg, "Resent-Date", "").strip()
-        if rd:
-            dt = parsedate_to_datetime(rd)
-            if dt is not None and 1900 <= dt.year <= 2100:
-                return dt
-    except Exception:
-        pass
+        # 3. Received headers
+        try:
+            for rcv in safe_get_all_headers(msg, "Received"):
+                if ";" in rcv:
+                    date_part = rcv.rsplit(";", 1)[1].strip()
+                    try:
+                        dt = parsedate_to_datetime(date_part)
+                        if dt is not None and 1900 <= dt.year <= 2100:
+                            return dt
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
-    # 3. Received headers
-    try:
-        for rcv in safe_get_all_headers(msg, "Received"):
-            if ";" in rcv:
-                date_part = rcv.rsplit(";", 1)[1].strip()
-                try:
-                    dt = parsedate_to_datetime(date_part)
-                    if dt is not None and 1900 <= dt.year <= 2100:
-                        return dt
-                except Exception:
-                    pass
-    except Exception:
-        pass
+    if fallback_dt is not None:
+        return fallback_dt
+    if fallback_timestamp is not None:
+        try:
+            return datetime.fromtimestamp(fallback_timestamp, tz=timezone.utc)
+        except Exception:
+            pass
 
     return None
 
 
-def pick_year_month(msg) -> Tuple[int, int]:
-    """Extract (year, month) from Date or Received header; default to (1970, 1) if missing/invalid."""
+def pick_year_month(msg, fallback_timestamp: Optional[float] = None) -> Tuple[int, int]:
+    """Extract (year, month) from Date, Received header, or mtime fallback; default to (1970, 1) if missing/invalid."""
     try:
-        dt = extract_best_datetime(msg)
+        dt = extract_best_datetime(msg, fallback_timestamp=fallback_timestamp)
         if dt is not None and 1900 <= dt.year <= 2100:
             return dt.year, dt.month
     except Exception:
@@ -429,6 +471,7 @@ class MailRecord:
     is_deleted: bool = False
     flags: Dict[str, bool] = field(default_factory=dict)
     native_msg_path: Optional[str] = None
+    file_mtime: Optional[float] = None
 
 
 def default_flags(
@@ -1886,6 +1929,7 @@ def _iter_records_from_bytes(
     ext_flags: Optional[Dict[str, bool]] = None,
     native_msg_path: Optional[str] = None,
     parse_gmail: bool = True,
+    file_mtime: Optional[float] = None,
 ) -> Iterator[MailRecord]:
     low = filename.lower()
     fmt = _sniff_stream_format(data[:4096])
@@ -1899,6 +1943,7 @@ def _iter_records_from_bytes(
                 source_name=filename,
                 is_deleted=flags.get("is_deleted", False),
                 flags=flags,
+                file_mtime=file_mtime,
             )
         return
 
@@ -1913,6 +1958,7 @@ def _iter_records_from_bytes(
                     is_deleted=flags.get("is_deleted", False),
                     flags=flags,
                     native_msg_path=native_msg_path,
+                    file_mtime=file_mtime,
                 )
         except Exception:
             pass
@@ -1961,6 +2007,8 @@ def _iter_records_from_bytes(
             source_name=filename,
             is_deleted=flags.get("is_deleted", False),
             flags=flags,
+            native_msg_path=native_msg_path,
+            file_mtime=file_mtime,
         )
 
 
@@ -2202,6 +2250,11 @@ def iter_file_records(
         yield from iter_zip_or_olm_records(lp, folder_parts or [], include_deleted=include_deleted, parse_gmail=parse_gmail)
         return
 
+    try:
+        file_mtime = os.path.getmtime(lp)
+    except OSError:
+        file_mtime = None
+
     if low.endswith(".msg") or fmt == "msg":
         try:
             with open(lp, "rb") as fp:
@@ -2214,6 +2267,7 @@ def iter_file_records(
                 ext_flags=ext_flags,
                 native_msg_path=os.path.abspath(file_path),
                 parse_gmail=parse_gmail,
+                file_mtime=file_mtime,
             )
         except OSError:
             pass
@@ -2230,6 +2284,7 @@ def iter_file_records(
                 include_deleted=include_deleted,
                 ext_flags=ext_flags,
                 parse_gmail=parse_gmail,
+                file_mtime=file_mtime,
             )
         except OSError:
             pass
@@ -2263,6 +2318,7 @@ def iter_file_records(
                 include_deleted=include_deleted,
                 ext_flags=ext_flags,
                 parse_gmail=parse_gmail,
+                file_mtime=file_mtime,
             )
         except OSError:
             pass
