@@ -281,6 +281,19 @@ Detailed technical documentation mapping IETF RFCs and Microsoft Open Specificat
 
 ---
 
+## Credits & Attribution
+
+`mail2mail` is built on a rich foundation of open-source projects, community fork contributions, and collaborative AI pair-programming:
+- **Project Maintainer**: Anthony Paolucci ([@adpaolucci](https://github.com/adpaolucci))
+- **AI Collaborators**: Argon 4 (Anthropic) & Antigravity (Google DeepMind)
+- **Original Upstream Origin**: Rick Madson ([@madsonrick](https://github.com/madsonrick/mbox-to-pst-toolkit))
+- **Community Fork Contributors**: [@gbordier](https://github.com/gbordier), [@HTCGS](https://github.com/HTCGS), [@enthusedamateur](https://github.com/enthusedamateur), [@dianlight](https://github.com/dianlight), [@icmaa](https://github.com/icmaa), [@Erzmaster](https://github.com/Erzmaster), [@ITKKDF](https://github.com/ITKKDF)
+- **Related Prior Art**: `3en5` ([KALIT/Natanor IT Services](https://github.com/3en5/EML-to-PST)), `SSDECT` ([@ssdect](https://github.com/ssdect/eml-to-pst)), and `MimeKit`/`MsgKit`
+
+For complete attributions, architectural histories, and technical details, see [**`CONTRIBUTORS.md`**](CONTRIBUTORS.md).
+
+---
+
 ## License
 
 Released under the [MIT License](LICENSE).
