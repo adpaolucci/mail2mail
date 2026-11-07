@@ -1,11 +1,11 @@
 {
-  "id": "chk_1794067866812",
-  "timestamp": "2026-11-07T16:11:06.812355700Z",
+  "id": "chk_1794068636913",
+  "timestamp": "2026-11-07T16:23:56.913695600Z",
   "source_id": "imap://mail.company.com:993",
   "target_id": "C:\\Archives\\archive.pst",
   "migrated_message_ids": [
-    "<spec-titan-002@mail2rust.local>",
     "<spec-titan-001@mail2rust.local>",
+    "<spec-titan-002@mail2rust.local>",
     "<audit-ediscovery-003@mail2rust.local>"
   ],
   "folder_high_watermarks": {
