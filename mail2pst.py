@@ -8,6 +8,7 @@ Directly converts and imports any supported email or mailbox format:
   - Apple Mail (.emlx, .partial.emlx, *.mbox / *.imapmbox bundles)
   - Outlook .msg (native MAPI OpenSharedItem transfer + pure-Python MS-CFB fallback)
   - Outlook for Mac .olm archives
+  - Outlook .pst Personal Folders (for splitting, merging, or filtering PSTs by year/size)
   - MH / Claws Mail / Sylpheed directories
   - MMDF & Emacs Babyl files
   - Standard .eml files & directory trees
@@ -24,20 +25,16 @@ Supports both:
 from __future__ import annotations
 
 import argparse
-import email
 import functools
 import gc
-import mailbox
 import mimetypes
 import os
-import re
 import shutil
 import sys
 import tempfile
 import time
 from datetime import datetime, timezone
 from email import policy
-from email.header import decode_header, make_header
 from email.parser import BytesParser
 from email.utils import getaddresses, parsedate_to_datetime
 from typing import Dict, List, Optional, Set, Tuple
@@ -51,21 +48,27 @@ except Exception:
     sys.exit(1)
 
 from mail_formats import (
-    WINDOWS_RESERVED_NAMES,
-    iter_mail_records,
-    win_long_path,
-)
-from mail2eml import (
     FORBIDDEN_CHARS,
-    IGNORED_DIR_SUFFIXES,
     MSG_FLAG_EXPUNGED,
     MSG_FLAG_FORWARDED,
     MSG_FLAG_MARKED,
     MSG_FLAG_READ,
     MSG_FLAG_REPLIED,
+    WINDOWS_RESERVED_NAMES,
+    decode_imap_utf7,
+    decode_mime_words,
     decode_modified_utf7,
-    is_probable_mbox,
+    extract_message_flags,
+    iter_mail_records,
+    pick_year_month,
+    safe_get_all_headers,
+    safe_get_header,
+    sanitize_name,
+    win_long_path,
 )
+
+parse_message_flags = extract_message_flags
+sanitize_folder_name = sanitize_name
 
 # ----------------------- MAPI Property Tags (DASL) -----------------------
 
@@ -128,82 +131,6 @@ def com_retry(max_attempts: int = 5, base_delay: float = 0.25):
     return decorator
 
 
-def sanitize_name(s: str, default: str = "item", max_len: int = 120) -> str:
-    """Make a Windows/Outlook-safe folder or file name."""
-    if not isinstance(s, str):
-        s = str(s or "")
-    s = decode_modified_utf7(s)
-    s = re.sub(r'[\x00-\x1f\x7f\\/:*?"<>|]+', "_", s)
-    s = re.sub(r"\s+", " ", s).strip(" .")
-    if not s:
-        s = default
-    if s.upper().split(".")[0] in WINDOWS_RESERVED_NAMES:
-        s = f"_{s}"
-    if len(s) > max_len:
-        base, ext = os.path.splitext(s)
-        if ext and len(ext) <= 12:
-            keep = max(1, max_len - len(ext))
-            s = base[:keep].rstrip(" .") + ext
-        else:
-            s = s[:max_len].strip(" .")
-    return s or default
-
-
-def sanitize_folder_name(name: str, default: str = "Unnamed_Folder", max_len: int = 120) -> str:
-    """Decode IMAP Modified UTF-7 and strip illegal characters from folder/attachment names."""
-    return sanitize_name(name, default=default, max_len=max_len)
-
-
-def decode_mime_words(s) -> str:
-    """Safely decode RFC 2047 encoded-word headers into a clean Unicode string."""
-    if not s:
-        return ""
-    try:
-        return str(make_header(decode_header(str(s))))
-    except Exception:
-        return str(s)
-
-
-def safe_get_header(msg, name: str, default: str = "") -> str:
-    """
-    Safely read a single header from an email.message.Message under policy.default
-    without failing on malformed RFC 5322 headers (HeaderParseError / IndexError / ValueError).
-    """
-    try:
-        v = msg.get(name)
-        if v is not None:
-            return str(v)
-    except Exception:
-        pass
-    target = name.lower()
-    try:
-        for k, raw_v in msg.raw_items():
-            if k.lower() == target:
-                return decode_mime_words(raw_v)
-    except Exception:
-        pass
-    return default
-
-
-def safe_get_all_headers(msg, name: str) -> List[str]:
-    """Safely read all instances of a header from an email.message.Message."""
-    try:
-        vals = msg.get_all(name)
-        if vals:
-            return [str(v) for v in vals if v is not None]
-    except Exception:
-        pass
-    target = name.lower()
-    out: List[str] = []
-    try:
-        for k, raw_v in msg.raw_items():
-            if k.lower() == target and raw_v is not None:
-                out.append(decode_mime_words(raw_v))
-    except Exception:
-        pass
-    return out
-
-
 def addresses_to_str(header_val) -> str:
     """
     Convert one or more address headers into a semicolon-separated list for Outlook.
@@ -259,54 +186,7 @@ def to_mapi_utc(pa, dt: datetime) -> datetime:
     return dt.replace(tzinfo=None)
 
 
-# ----------------------- Status Flags & MIME Extraction -----------------------
-
-def extract_message_flags(msg) -> Tuple[bool, bool, bool, bool, bool]:
-    """
-    Inspect X-Mozilla-Status, Status, X-Status, and X-Message-Flag headers.
-    Returns (is_read, is_flagged, is_replied, is_forwarded, is_expunged).
-    Defaults to is_read=True for standard EMLs that have no status headers at all.
-    """
-    is_read = True
-    is_flagged = False
-    is_replied = False
-    is_forwarded = False
-    is_expunged = False
-
-    tb_status = safe_get_header(msg, "X-Mozilla-Status", "").strip()
-    if tb_status:
-        try:
-            val = int(tb_status, 16)
-            is_read      = bool(val & MSG_FLAG_READ)
-            is_replied   = bool(val & MSG_FLAG_REPLIED)
-            is_flagged   = bool(val & MSG_FLAG_MARKED)
-            is_expunged  = bool(val & MSG_FLAG_EXPUNGED)
-            is_forwarded = bool(val & MSG_FLAG_FORWARDED)
-            return is_read, is_flagged, is_replied, is_forwarded, is_expunged
-        except ValueError:
-            pass
-
-    status_hdr = safe_get_header(msg, "Status", "").upper()
-    if status_hdr:
-        is_read = ("R" in status_hdr)
-
-    x_status = safe_get_header(msg, "X-Status", "").upper()
-    if "F" in x_status:
-        is_flagged = True
-    if "A" in x_status:
-        is_replied = True
-    if "W" in x_status:
-        is_forwarded = True
-    if "D" in x_status or "D" in status_hdr:
-        is_expunged = True
-
-    if safe_get_header(msg, "X-Message-Flag", "").strip():
-        is_flagged = True
-
-    return is_read, is_flagged, is_replied, is_forwarded, is_expunged
-
-
-parse_message_flags = extract_message_flags
+# ----------------------- MIME Body & Attachment Extraction -----------------------
 
 
 def _decode_part_text(part) -> str:
@@ -909,27 +789,6 @@ class PstRouter:
             self.open_roots.pop(key, None)
 
 
-# ----------------------- Legacy & Direct Helper Functions -----------------------
-
-def list_eml_files(root_dir: str) -> Tuple[List[Tuple[str, int]], int]:
-    """Return [(path, size)], total_bytes – recursively collects *.eml."""
-    files = []
-    total_bytes = 0
-    for base, _, fnames in os.walk(win_long_path(root_dir)):
-        clean_base = base[4:] if base.startswith("\\\\?\\") and not base.startswith("\\\\?\\UNC\\") else base
-        for fn in fnames:
-            if fn.lower().endswith(".eml"):
-                p = os.path.join(clean_base, fn)
-                try:
-                    sz = os.path.getsize(win_long_path(p))
-                except OSError:
-                    sz = 0
-                files.append((p, sz))
-                total_bytes += sz
-    files.sort()
-    return files, total_bytes
-
-
 def estimate_source_bytes(src_path: str) -> int:
     """Estimate total source bytes across a file, archive, or directory tree."""
     lp = win_long_path(src_path)
@@ -948,141 +807,6 @@ def estimate_source_bytes(src_path: str) -> int:
             except OSError:
                 pass
     return total
-
-
-def import_mbox_to_outlook(mbox_path: str, outlook_folder, temp_dir: str, include_deleted: bool = False) -> Tuple[int, int]:
-    """Process an mbox file and add messages directly into the destination Outlook folder."""
-    if os.path.getsize(win_long_path(mbox_path)) == 0:
-        return 0, 0
-
-    print(f"[*] Processing: {os.path.basename(mbox_path)} -> [{outlook_folder.Name}]")
-
-    try:
-        mbox = mailbox.mbox(mbox_path, create=False)
-    except Exception as e:
-        print(f"    [!] Error opening mbox {mbox_path}: {e}")
-        return 0, 0
-
-    count = 0
-    skipped_deleted = 0
-
-    try:
-        for idx, msg in enumerate(mbox):
-            try:
-                raw_bytes = msg.as_bytes()
-                if not raw_bytes:
-                    continue
-
-                parsed = email.message_from_bytes(raw_bytes, policy=policy.default)
-                flags = parse_message_flags(parsed)
-                if flags[4] and not include_deleted:
-                    skipped_deleted += 1
-                    continue
-
-                pythoncom.PumpWaitingMessages()
-                new_item = outlook_folder.Items.Add(0)
-                populate_mailitem(new_item, parsed, raw_bytes, temp_dir, flags=flags)
-                del new_item
-
-                count += 1
-                if count % 100 == 0:
-                    print(f"    -> {count} items imported...")
-                    gc.collect()
-            except Exception as err:
-                print(f"    [!] Skipped message #{idx}: {err}")
-                continue
-    finally:
-        mbox.close()
-
-    summary = f"    [+] Finished: {count} messages imported into '{outlook_folder.Name}'"
-    if skipped_deleted:
-        summary += f" ({skipped_deleted} deleted/expunged skipped)"
-    print(summary + ".")
-    return count, skipped_deleted
-
-
-def convert_source_to_outlook(
-    src_path: str,
-    root_outlook_folder,
-    temp_dir: str,
-    include_deleted: bool = False,
-    namespace=None,
-) -> Tuple[int, int]:
-    """
-    Universal converter that streams any supported mailbox format via
-    mail_formats.iter_mail_records into root_outlook_folder.
-    Returns (total_imported, total_skipped).
-    """
-    folder_cache = {(): root_outlook_folder}
-    total_imported = 0
-    total_skipped = 0
-
-    def _resolve_folder(parts):
-        key = tuple(parts)
-        if key in folder_cache:
-            return folder_cache[key]
-        curr = root_outlook_folder
-        built = []
-        for p in parts:
-            built.append(p)
-            sub_key = tuple(built)
-            if sub_key in folder_cache:
-                curr = folder_cache[sub_key]
-            else:
-                curr = get_or_create_subfolder(curr, p)
-                folder_cache[sub_key] = curr
-        return curr
-
-    for idx, rec in enumerate(iter_mail_records(src_path, include_deleted=True), 1):
-        raw_bytes = rec.raw_bytes
-        if not raw_bytes:
-            continue
-
-        try:
-            parsed = email.message_from_bytes(raw_bytes, policy=policy.default)
-            flags = parse_message_flags(parsed)
-            if (rec.is_deleted or flags[4]) and not include_deleted:
-                total_skipped += 1
-                continue
-
-            folder_parts = rec.folder_parts or ["Inbox"]
-            target_folder = _resolve_folder(folder_parts)
-
-            pythoncom.PumpWaitingMessages()
-
-            imported_native = False
-            if namespace is not None and rec.native_msg_path and os.path.isfile(win_long_path(rec.native_msg_path)):
-                try:
-                    import_native_msg_to_outlook(namespace, target_folder, rec.native_msg_path)
-                    imported_native = True
-                except Exception:
-                    imported_native = False
-
-            if not imported_native:
-                new_item = target_folder.Items.Add(0)
-                populate_mailitem(new_item, parsed, raw_bytes, temp_dir, flags=flags)
-                del new_item
-
-            total_imported += 1
-            if total_imported % 100 == 0:
-                print(f"    -> {total_imported} items imported...")
-                gc.collect()
-        except Exception as err:
-            print(f"    [!] Skipped message #{idx} ({rec.source_name}): {err}")
-            continue
-
-    return total_imported, total_skipped
-
-
-def traverse_and_convert(current_dir: str, current_outlook_folder, temp_dir: str, include_deleted: bool = False, namespace=None):
-    """Walk through any supported mailbox directory or archive and import into current_outlook_folder."""
-    return convert_source_to_outlook(
-        current_dir,
-        current_outlook_folder,
-        temp_dir,
-        include_deleted=include_deleted,
-        namespace=namespace,
-    )
 
 
 # ----------------------- Unified mail2pst CLI -----------------------

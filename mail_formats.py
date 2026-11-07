@@ -2,19 +2,20 @@
 """
 mail_formats.py
 
-Unified multi-format email & mailbox reader for mail2mail (mail2eml / mail2pst).
+Unified multi-format email & mailbox reader and shared utilities for mail2mail
+(mail2eml, mail2mbox, mail2pst).
+
 Supports reading and streaming messages with folder hierarchy and status flags from:
   1. Standard MBOX files (mboxo / mboxrd) & Thunderbird ImapMail/Mail (.sbd, mUTF-7)
   2. Maildir & Maildir++ (cur/, new/, tmp/, :2,FRS flags, .Folder.Subfolder, Thunderbird Maildir)
   3. Apple Mail (.emlx, .partial.emlx, and macOS *.mbox / *.imapmbox directory bundles)
   4. Outlook .msg files (pure-Python MS-CFB OLE2 + MS-OXMSG parser, plus native path tracking)
   5. Outlook for Mac .olm archives (ZIP + XML message & attachment reconstruction)
-  6. MH / Sylpheed / Claws Mail directories (numbered files + .mh_sequences)
-  7. MMDF (\x01\x01\x01\x01 delimited) and Emacs Babyl (BABYL OPTIONS:) mailboxes
-  8. Standard .eml files & directory trees
-  9. Compressed files & archives (.gz, .bz2, .xz, .zip, .tar, .tar.gz, .tgz, .tar.bz2, .tar.xz)
-
-Uses only the Python standard library.
+  6. Outlook .pst archives (via Outlook MAPI on Windows)
+  7. MH / Sylpheed / Claws Mail directories (numbered files + .mh_sequences)
+  8. MMDF (\x01\x01\x01\x01 delimited) and Emacs Babyl (BABYL OPTIONS:) mailboxes
+  9. Standard .eml files & directory trees
+ 10. Compressed files & archives (.gz, .bz2, .xz, .zip, .tar, .tar.gz, .tgz, .tar.bz2, .tar.xz)
 """
 
 from __future__ import annotations
@@ -30,27 +31,40 @@ import mimetypes
 import os
 import plistlib
 import re
+import shutil
 import struct
 import tarfile
+import tempfile
 import urllib.parse
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from email import policy
+from email.header import decode_header, make_header
 from email.message import EmailMessage
+from email.utils import parsedate_to_datetime
 from typing import BinaryIO, Dict, Iterator, List, Optional, Set, Tuple
 import xml.etree.ElementTree as ET
 
 
-# ----------------------- Windows Path & Name Helpers -----------------------
+# ----------------------- Constants & Regexes -----------------------
 
+MSG_FLAG_READ      = 0x0001
+MSG_FLAG_REPLIED   = 0x0002
+MSG_FLAG_MARKED    = 0x0004  # Flagged / Starred in Thunderbird
+MSG_FLAG_EXPUNGED  = 0x0008  # Deleted (awaiting folder compaction)
+MSG_FLAG_FORWARDED = 0x1000  # Forwarded
+
+FORBIDDEN_CHARS = r'\/:*?"<>|'
 WINDOWS_RESERVED_NAMES = {
     "CON", "PRN", "AUX", "NUL",
-    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
 }
 
-THUNDERBIRD_SKIP_SUFFIXES = (".msf", ".dat", ".wdseml", ".mozmsgs", ".html", ".json", ".sqlite", ".mab")
+THUNDERBIRD_SKIP_SUFFIXES = (
+    ".msf", ".dat", ".wdseml", ".mozmsgs", ".html", ".json", ".sqlite", ".mab", ".db", ".log", ".ini"
+)
 THUNDERBIRD_SKIP_FILES = {
     "msgfilterrules.dat",
     "filterlog.html",
@@ -94,7 +108,10 @@ HEADER_START_RE = re.compile(
 )
 MAILDIR_FLAG_RE = re.compile(r"[:;!✓]2,([A-Za-z]*)$")
 OLE2_MAGIC = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"
+PST_MAGIC = b"!BDN"
 
+
+# ----------------------- Shared Path, Name & Header Helpers -----------------------
 
 def win_long_path(path: str) -> str:
     """Prefix Windows paths with \\\\?\\ when approaching MAX_PATH (260 chars)."""
@@ -111,7 +128,10 @@ def win_long_path(path: str) -> str:
 
 
 def decode_imap_utf7(s: str) -> str:
-    """Decode IMAP Modified UTF-7 folder names (RFC 3501 Section 5.1.3)."""
+    """
+    Decode IMAP Modified UTF-7 folder names (RFC 3501 Section 5.1.3).
+    Example: 'Notes &- Invoices' -> 'Notes & Invoices', 'Caf&AOk-' -> 'Café'
+    """
     if not s or "&" not in s:
         return s
     out: List[str] = []
@@ -140,6 +160,9 @@ def decode_imap_utf7(s: str) -> str:
     return "".join(out)
 
 
+decode_modified_utf7 = decode_imap_utf7
+
+
 def clean_folder_segment(name: str) -> str:
     """Decode IMAP mUTF-7 and strip container suffixes (.sbd, .mbox, etc.)."""
     s = name.strip()
@@ -149,6 +172,96 @@ def clean_folder_segment(name: str) -> str:
             break
     s = decode_imap_utf7(s).strip()
     return s or "Folder"
+
+
+def sanitize_name(s: str, default: str = "item", max_len: int = 120) -> str:
+    """
+    Decode IMAP Modified UTF-7 and return a Windows/POSIX/Outlook-safe folder or filename.
+    Preserves file extensions when truncating to max_len.
+    """
+    if not isinstance(s, str):
+        s = str(s or "")
+    s = decode_imap_utf7(s)
+    s = re.sub(r'[\x00-\x1f\x7f\\/:*?"<>|]+', "_", s)
+    s = re.sub(r"\s+", " ", s).strip(" .")
+    if not s:
+        s = default
+    if s.upper().split(".")[0] in WINDOWS_RESERVED_NAMES:
+        s = f"_{s}"
+    if len(s) > max_len:
+        base, ext = os.path.splitext(s)
+        if ext and len(ext) <= 12:
+            keep = max(1, max_len - len(ext))
+            s = base[:keep].rstrip(" .") + ext
+        else:
+            s = s[:max_len].strip(" .")
+    return s or default
+
+
+def decode_mime_words(s) -> str:
+    """Safely decode RFC 2047 encoded-word headers into a clean Unicode string."""
+    if not s:
+        return ""
+    try:
+        return str(make_header(decode_header(str(s))))
+    except Exception:
+        return str(s)
+
+
+def safe_get_header(msg, name: str, default: str = "") -> str:
+    """
+    Safely read and decode a single header from an email.message.Message without
+    failing on malformed RFC 5322 headers (HeaderParseError / IndexError / ValueError).
+    """
+    try:
+        v = msg.get(name)
+        if v is not None:
+            return decode_mime_words(v)
+    except Exception:
+        pass
+    target = name.lower()
+    try:
+        for k, raw_v in msg.raw_items():
+            if k.lower() == target:
+                return decode_mime_words(raw_v)
+    except Exception:
+        pass
+    return default
+
+
+def safe_get_all_headers(msg, name: str) -> List[str]:
+    """Safely read all instances of a header from an email.message.Message."""
+    try:
+        vals = msg.get_all(name)
+        if vals:
+            return [decode_mime_words(v) for v in vals if v is not None]
+    except Exception:
+        pass
+    target = name.lower()
+    out: List[str] = []
+    try:
+        for k, raw_v in msg.raw_items():
+            if k.lower() == target and raw_v is not None:
+                out.append(decode_mime_words(raw_v))
+    except Exception:
+        pass
+    return out
+
+
+def pick_year_month(msg) -> Tuple[int, int]:
+    """Extract (year, month) from the Date header; default to (1970, 1) if missing/invalid."""
+    year = 1970
+    month = 1
+    try:
+        d = safe_get_header(msg, "Date", "").strip()
+        if d:
+            dt = parsedate_to_datetime(d)
+            if dt is not None and 1900 <= dt.year <= 2100:
+                year = dt.year
+                month = dt.month
+    except Exception:
+        pass
+    return year, month
 
 
 # ----------------------- Data Model & Status Flags -----------------------
@@ -184,21 +297,21 @@ def flags_to_mozilla_status_hex(flags: Dict[str, bool]) -> str:
     """Convert normalized boolean flags into a 4-digit hex X-Mozilla-Status value."""
     bits = 0
     if flags.get("is_read", True):
-        bits |= 0x0001
+        bits |= MSG_FLAG_READ
     if flags.get("is_replied", False):
-        bits |= 0x0002
+        bits |= MSG_FLAG_REPLIED
     if flags.get("is_flagged", False):
-        bits |= 0x0004
+        bits |= MSG_FLAG_MARKED
     if flags.get("is_deleted", False):
-        bits |= 0x0008
+        bits |= MSG_FLAG_EXPUNGED
     if flags.get("is_forwarded", False):
-        bits |= 0x1000
+        bits |= MSG_FLAG_FORWARDED
     return f"{bits:04x}"
 
 
 def extract_flags_from_headers(raw_bytes: bytes) -> Tuple[Dict[str, bool], bool]:
     """
-    Inspect raw RFC 822 header block for X-Mozilla-Status or Status/X-Status.
+    Inspect raw RFC 822 header block for X-Mozilla-Status, Status, X-Status, or X-Message-Flag.
     Returns (flags_dict, found_explicit_header).
     """
     sep_crlf = raw_bytes.find(b"\r\n\r\n")
@@ -217,11 +330,11 @@ def extract_flags_from_headers(raw_bytes: bytes) -> Tuple[Dict[str, bool], bool]
             val = int(moz_match.group(1), 16)
             return (
                 default_flags(
-                    is_read=bool(val & 0x0001),
-                    is_replied=bool(val & 0x0002),
-                    is_flagged=bool(val & 0x0004),
-                    is_deleted=bool(val & 0x0008),
-                    is_forwarded=bool(val & 0x1000),
+                    is_read=bool(val & MSG_FLAG_READ),
+                    is_replied=bool(val & MSG_FLAG_REPLIED),
+                    is_flagged=bool(val & MSG_FLAG_MARKED),
+                    is_deleted=bool(val & MSG_FLAG_EXPUNGED),
+                    is_forwarded=bool(val & MSG_FLAG_FORWARDED),
                 ),
                 True,
             )
@@ -230,19 +343,21 @@ def extract_flags_from_headers(raw_bytes: bytes) -> Tuple[Dict[str, bool], bool]
 
     status_match = re.search(r"(?im)^Status\s*:\s*([^\r\n]+)", text)
     xstatus_match = re.search(r"(?im)^X-Status\s*:\s*([^\r\n]+)", text)
-    if status_match or xstatus_match:
+    flag_match = re.search(r"(?im)^X-Message-Flag\s*:\s*([^\r\n]+)", text)
+    if status_match or xstatus_match or flag_match:
         st = (status_match.group(1) if status_match else "").upper()
         xst = (xstatus_match.group(1) if xstatus_match else "").upper()
-        is_read = ("R" in st) or ("O" in st and "U" not in st)
+        mfl = (flag_match.group(1) if flag_match else "").strip()
+        is_read = ("R" in st) if st else True
         if "U" in st:
             is_read = False
         return (
             default_flags(
                 is_read=is_read,
                 is_replied=("A" in xst),
-                is_flagged=("F" in xst),
+                is_flagged=("F" in xst) or bool(mfl),
                 is_deleted=("D" in xst or "D" in st),
-                is_forwarded=False,
+                is_forwarded=("W" in xst),
             ),
             True,
         )
@@ -250,10 +365,127 @@ def extract_flags_from_headers(raw_bytes: bytes) -> Tuple[Dict[str, bool], bool]
     return default_flags(is_read=True), False
 
 
+def extract_message_flags(msg) -> Tuple[bool, bool, bool, bool, bool]:
+    """
+    Inspect X-Mozilla-Status, Status, X-Status, and X-Message-Flag on a parsed Message.
+    Returns (is_read, is_flagged, is_replied, is_forwarded, is_expunged).
+    """
+    is_read = True
+    is_flagged = False
+    is_replied = False
+    is_forwarded = False
+    is_expunged = False
+
+    tb_status = safe_get_header(msg, "X-Mozilla-Status", "").strip()
+    if tb_status:
+        try:
+            val = int(tb_status, 16)
+            return (
+                bool(val & MSG_FLAG_READ),
+                bool(val & MSG_FLAG_MARKED),
+                bool(val & MSG_FLAG_REPLIED),
+                bool(val & MSG_FLAG_FORWARDED),
+                bool(val & MSG_FLAG_EXPUNGED),
+            )
+        except ValueError:
+            pass
+
+    status_hdr = safe_get_header(msg, "Status", "").upper()
+    if status_hdr:
+        is_read = ("R" in status_hdr)
+
+    x_status = safe_get_header(msg, "X-Status", "").upper()
+    if "F" in x_status:
+        is_flagged = True
+    if "A" in x_status:
+        is_replied = True
+    if "W" in x_status:
+        is_forwarded = True
+    if "D" in x_status or "D" in status_hdr:
+        is_expunged = True
+
+    if safe_get_header(msg, "X-Message-Flag", "").strip():
+        is_flagged = True
+
+    return is_read, is_flagged, is_replied, is_forwarded, is_expunged
+
+
+def update_status_headers(
+    raw_header_bytes: bytes,
+    is_read: bool,
+    is_flagged: bool,
+    is_replied: bool,
+    is_forwarded: bool = False,
+) -> bytes:
+    """
+    Directly filter and update Status, X-Status, and X-Message-Flag headers at the byte level.
+    Preserves 100% of MIME structure, DKIM signatures, and line folding.
+    """
+    lines = raw_header_bytes.splitlines(keepends=True)
+    filtered_lines = []
+    skip_continuation = False
+    target_prefixes = (b"status:", b"x-status:", b"x-message-flag:")
+
+    for line in lines:
+        lower = line.lower()
+        if any(lower.startswith(prefix) for prefix in target_prefixes):
+            skip_continuation = True
+            continue
+        if skip_continuation and (line.startswith(b" ") or line.startswith(b"\t")):
+            continue
+        skip_continuation = False
+        filtered_lines.append(line)
+
+    if filtered_lines and not filtered_lines[-1].endswith((b"\r\n", b"\n", b"\r")):
+        filtered_lines[-1] = filtered_lines[-1] + b"\r\n"
+
+    status_hdr = b"Status: RO\r\n" if is_read else b"Status: O\r\n"
+    filtered_lines.append(status_hdr)
+
+    x_status_val = b""
+    if is_flagged:
+        x_status_val += b"F"
+    if is_replied:
+        x_status_val += b"A"
+    if is_forwarded:
+        x_status_val += b"W"
+    if x_status_val:
+        filtered_lines.append(b"X-Status: " + x_status_val + b"\r\n")
+
+    if is_flagged:
+        filtered_lines.append(b"X-Message-Flag: Follow up\r\n")
+
+    return b"".join(filtered_lines)
+
+
+def normalize_eml_bytes_with_flags(raw_bytes: bytes, flags: Dict[str, bool]) -> bytes:
+    """Split raw RFC 822 message into headers + body and apply update_status_headers."""
+    sep_crlf = raw_bytes.find(b"\r\n\r\n")
+    sep_lf = raw_bytes.find(b"\n\n")
+    if sep_crlf != -1 and (sep_lf == -1 or sep_crlf < sep_lf):
+        hdr = raw_bytes[:sep_crlf]
+        body = raw_bytes[sep_crlf + 4 :]
+    elif sep_lf != -1:
+        hdr = raw_bytes[:sep_lf]
+        body = raw_bytes[sep_lf + 2 :]
+    else:
+        hdr = raw_bytes
+        body = b""
+
+    hdr_flags, has_hdr = extract_flags_from_headers(hdr)
+    is_read = flags.get("is_read", hdr_flags["is_read"]) if not has_hdr else hdr_flags["is_read"]
+    is_flagged = flags.get("is_flagged", False) or hdr_flags["is_flagged"]
+    is_replied = flags.get("is_replied", False) or hdr_flags["is_replied"]
+    is_forwarded = flags.get("is_forwarded", False) or hdr_flags["is_forwarded"]
+
+    norm_hdr = update_status_headers(hdr, is_read, is_flagged, is_replied, is_forwarded)
+    return norm_hdr.rstrip(b"\r\n") + b"\r\n\r\n" + body
+
+
 def inject_mozilla_status_bytes(raw_bytes: bytes, flags: Dict[str, bool]) -> bytes:
     """
     Ensure X-Mozilla-Status (and Status/X-Status) headers exist in raw_bytes
-    so downstream EML and PST tools preserve Read/Replied/Flagged/Forwarded state.
+    so downstream EML, MBOX, and PST tools preserve Read/Replied/Flagged/Forwarded state.
     """
     if not raw_bytes:
         return raw_bytes
@@ -269,6 +501,8 @@ def inject_mozilla_status_bytes(raw_bytes: bytes, flags: Dict[str, bool]) -> byt
         xstatus_chars.append("A")
     if flags.get("is_flagged"):
         xstatus_chars.append("F")
+    if flags.get("is_forwarded"):
+        xstatus_chars.append("W")
     if flags.get("is_deleted"):
         xstatus_chars.append("D")
 
@@ -276,7 +510,6 @@ def inject_mozilla_status_bytes(raw_bytes: bytes, flags: Dict[str, bool]) -> byt
     if xstatus_chars:
         prefix += b"X-Status: " + "".join(xstatus_chars).encode("ascii") + nl
 
-    # If the message begins with an mbox "From " envelope line, insert after it
     if raw_bytes.startswith(b"From "):
         first_nl = raw_bytes.find(b"\n")
         if first_nl != -1:
@@ -312,12 +545,7 @@ def parse_maildir_flags(filename: str, in_new: bool = False) -> Tuple[Dict[str, 
 def normalize_maildir_folder_parts(rel_parts: List[str]) -> List[str]:
     """
     Convert relative path segments inside a Maildir / Maildir++ / Thunderbird Maildir
-    into logical PST folder parts.
-    Examples:
-      ['cur'] -> ['Inbox']
-      ['.Sent', 'cur'] -> ['Sent']
-      ['.Work.Projects.2025', 'new'] -> ['Work', 'Projects', '2025']
-      ['Archive.sbd', '2024', 'cur'] -> ['Archive', '2024']
+    into logical folder parts.
     """
     out: List[str] = []
     for part in rel_parts:
@@ -325,7 +553,6 @@ def normalize_maildir_folder_parts(rel_parts: List[str]) -> List[str]:
         if low in ("cur", "new", "tmp"):
             continue
         if part.startswith(".") and len(part) > 1:
-            # Maildir++ dot-separated hierarchy (e.g. .INBOX.Work or .Work.Projects)
             subparts = [clean_folder_segment(p) for p in part.lstrip(".").split(".") if p]
             if len(subparts) > 1 and subparts[0].upper() == "INBOX":
                 subparts = subparts[1:]
@@ -347,14 +574,12 @@ def parse_emlx_bytes(data: bytes) -> Tuple[bytes, Dict[str, bool]]:
     if not data:
         return b"", flags
 
-    # Check if first line is an integer byte count
     first_nl = data.find(b"\n")
     if first_nl == -1:
         return data, flags
 
     first_line = data[:first_nl].strip()
     if not first_line.isdigit():
-        # Already raw EML without byte count
         hdr_flags, _ = extract_flags_from_headers(data)
         return data, hdr_flags
 
@@ -362,7 +587,6 @@ def parse_emlx_bytes(data: bytes) -> Tuple[bytes, Dict[str, bool]]:
     payload_start = first_nl + 1
     candidate_end = payload_start + declared_len
 
-    # Locate trailing plist XML safely even if CRLF conversion shifted byte offsets
     plist_bytes = b""
     rfc822_bytes = b""
 
@@ -373,7 +597,6 @@ def parse_emlx_bytes(data: bytes) -> Tuple[bytes, Dict[str, bool]]:
             plist_bytes = remainder
 
     if not rfc822_bytes:
-        # Fallback: search from the end for <?xml, <!DOCTYPE plist, or <plist
         tail_search_start = max(payload_start, len(data) - 16384)
         tail = data[tail_search_start:]
         idx = -1
@@ -388,7 +611,6 @@ def parse_emlx_bytes(data: bytes) -> Tuple[bytes, Dict[str, bool]]:
         else:
             rfc822_bytes = data[payload_start : min(len(data), candidate_end)]
 
-    # Parse Apple Mail flags from plist
     if plist_bytes:
         apple_flags_int: Optional[int] = None
         try:
@@ -460,7 +682,6 @@ class _Ole2Reader:
         self.first_difat_sector = u32(68)
         self.num_difat_sectors = u32(72)
 
-        # Build DIFAT (list of FAT sector numbers)
         difat: List[int] = []
         for i in range(109):
             sec = u32(76 + i * 4)
@@ -481,7 +702,6 @@ class _Ole2Reader:
                     difat.append(sec)
             curr_difat = u32(off + entries_per_sector * 4)
 
-        # Build FAT array
         self.fat: List[int] = []
         ints_per_sec = self.sector_size // 4
         for sec in difat:
@@ -489,7 +709,6 @@ class _Ole2Reader:
             if off + self.sector_size <= len(data):
                 self.fat.extend(struct.unpack_from(f"<{ints_per_sec}I", data, off))
 
-        # Parse Directory Entries
         dir_bytes = self._read_sector_chain(self.first_dir_sector)
         self.entries: List[Dict] = []
         for pos in range(0, len(dir_bytes), 128):
@@ -517,7 +736,6 @@ class _Ole2Reader:
                 "size": size,
             })
 
-        # Build MiniFAT and MiniStream from Root Entry (entry 0)
         self.minifat: List[int] = []
         if self.first_minifat_sector < self.ENDOFCHAIN and self.num_minifat_sectors > 0:
             mf_bytes = self._read_sector_chain(self.first_minifat_sector, self.num_minifat_sectors * self.sector_size)
@@ -528,7 +746,6 @@ class _Ole2Reader:
         else:
             self.mini_stream = b""
 
-        # Build path -> entry map by traversing red-black sibling trees
         self.streams: Dict[str, Dict] = {}
         if self.entries:
             self._walk_tree(self.entries[0]["child"], "")
@@ -542,9 +759,9 @@ class _Ole2Reader:
         ent = self.entries[sid]
         self._walk_tree(ent["left"], prefix, visited)
         full_name = f"{prefix}/{ent['name']}" if prefix else ent["name"]
-        if ent["type"] == 2:  # Stream
+        if ent["type"] == 2:
             self.streams[full_name] = ent
-        elif ent["type"] == 1:  # Storage
+        elif ent["type"] == 1:
             self._walk_tree(ent["child"], full_name, visited)
         self._walk_tree(ent["right"], prefix, visited)
 
@@ -590,9 +807,8 @@ class _Ole2Reader:
 
 
 def _get_msg_prop_str(ole: _Ole2Reader, prefix: str, prop_id_hex: str) -> str:
-    """Read a string property (UTF-16LE 001F or ANSI/UTF-8 001E) from an MS-OXMSG storage."""
     base = f"{prefix}/__substg1.0_{prop_id_hex.upper()}" if prefix else f"__substg1.0_{prop_id_hex.upper()}"
-    for p, ent in ole.streams.items():
+    for p in ole.streams:
         p_up = p.upper()
         if p_up == f"{base.upper()}001F":
             raw = ole.read_stream(p)
@@ -607,7 +823,6 @@ def _get_msg_prop_str(ole: _Ole2Reader, prefix: str, prop_id_hex: str) -> str:
 
 
 def _get_msg_prop_bin(ole: _Ole2Reader, prefix: str, prop_id_hex: str) -> bytes:
-    """Read a binary property (0102) from an MS-OXMSG storage."""
     target = f"{prefix}/__substg1.0_{prop_id_hex.upper()}0102" if prefix else f"__substg1.0_{prop_id_hex.upper()}0102"
     for p in ole.streams:
         if p.upper() == target.upper():
@@ -616,11 +831,6 @@ def _get_msg_prop_bin(ole: _Ole2Reader, prefix: str, prop_id_hex: str) -> bytes:
 
 
 def _parse_msg_fixed_props(ole: _Ole2Reader, prefix: str = "") -> Dict[int, int]:
-    """
-    Parse `__properties_version1.0` stream to extract fixed-size MAPI properties
-    such as PR_MESSAGE_DELIVERY_TIME (0x0E060040), PR_CLIENT_SUBMIT_TIME (0x00390040),
-    PR_MESSAGE_FLAGS (0x0E070003), PR_FLAG_STATUS (0x10900003), PR_LAST_VERB_EXECUTED (0x10810003).
-    """
     stream_name = f"{prefix}/__properties_version1.0" if prefix else "__properties_version1.0"
     raw = b""
     for p in ole.streams:
@@ -629,7 +839,6 @@ def _parse_msg_fixed_props(ole: _Ole2Reader, prefix: str = "") -> Dict[int, int]
             break
     if not raw:
         return {}
-    # Top-level message header is 32 bytes; attachment/recipient header is 24 bytes (or 8 bytes)
     hdr_size = 32 if not prefix else 24
     if len(raw) < hdr_size:
         return {}
@@ -648,10 +857,9 @@ def parse_msg_bytes(data: bytes) -> Tuple[bytes, Dict[str, bool]]:
     ole = _Ole2Reader(data)
     fixed_props = _parse_msg_fixed_props(ole, "")
 
-    # Extract status flags from MAPI fixed properties
-    msg_flags = fixed_props.get(0x0E070003, 0x01) & 0xFFFFFFFF  # PR_MESSAGE_FLAGS (0x01 = MSGFLAG_READ)
-    flag_status = fixed_props.get(0x10900003, 0) & 0xFFFFFFFF   # PR_FLAG_STATUS (2 = olFlagMarked)
-    last_verb = fixed_props.get(0x10810003, 0) & 0xFFFFFFFF     # PR_LAST_VERB_EXECUTED
+    msg_flags = fixed_props.get(0x0E070003, 0x01) & 0xFFFFFFFF
+    flag_status = fixed_props.get(0x10900003, 0) & 0xFFFFFFFF
+    last_verb = fixed_props.get(0x10810003, 0) & 0xFFFFFFFF
 
     flags = default_flags(
         is_read=bool(msg_flags & 0x01),
@@ -682,7 +890,6 @@ def parse_msg_bytes(data: bytes) -> Tuple[bytes, Dict[str, bool]]:
     )
     msg_id = _get_msg_prop_str(ole, "", "1035")
 
-    # Collect structured recipients from __recip_version1.0_#XXXXXXXX
     recip_storages = sorted({
         p.split("/")[0]
         for p in ole.streams
@@ -693,7 +900,7 @@ def parse_msg_bytes(data: bytes) -> Tuple[bytes, Dict[str, bool]]:
     bcc_list: List[str] = []
     for r_prefix in recip_storages:
         r_props = _parse_msg_fixed_props(ole, r_prefix)
-        r_type = r_props.get(0x0C150003, 1) & 0xFFFFFFFF  # 1=To, 2=Cc, 3=Bcc
+        r_type = r_props.get(0x0C150003, 1) & 0xFFFFFFFF
         r_name = _get_msg_prop_str(ole, r_prefix, "3001")
         r_email = _get_msg_prop_str(ole, r_prefix, "39FE") or _get_msg_prop_str(ole, r_prefix, "3003")
         formatted = email.utils.formataddr((r_name, r_email)) if r_email else r_name
@@ -706,7 +913,6 @@ def parse_msg_bytes(data: bytes) -> Tuple[bytes, Dict[str, bool]]:
         else:
             to_list.append(formatted)
 
-    # Fallback to display To/Cc/Bcc if no recipient storages
     if not to_list:
         disp_to = _get_msg_prop_str(ole, "", "0E04")
         if disp_to:
@@ -720,7 +926,6 @@ def parse_msg_bytes(data: bytes) -> Tuple[bytes, Dict[str, bool]]:
         if disp_bcc:
             bcc_list = [disp_bcc]
 
-    # Determine Date from FILETIME or transport headers
     date_str = ""
     ft = fixed_props.get(0x0E060040) or fixed_props.get(0x00390040)
     if ft and ft > 0:
@@ -736,7 +941,6 @@ def parse_msg_bytes(data: bytes) -> Tuple[bytes, Dict[str, bool]]:
         if m_date:
             date_str = m_date.group(1).strip()
 
-    # Build EmailMessage
     msg = EmailMessage()
     if subject:
         msg["Subject"] = subject
@@ -767,7 +971,6 @@ def parse_msg_bytes(data: bytes) -> Tuple[bytes, Dict[str, bool]]:
     else:
         msg.set_content(body_text or "")
 
-    # Collect attachments from __attach_version1.0_#XXXXXXXX
     attach_storages = sorted({
         p.split("/")[0]
         for p in ole.streams
@@ -877,7 +1080,6 @@ def iter_olm_records(
         if "com.microsoft.__messages" not in member.lower() and not base_fname.startswith("message_"):
             continue
 
-        # Derive folder hierarchy from path after com.microsoft.__Messages
         raw_parts = [p for p in member.replace("\\", "/").split("/") if p]
         msg_marker_idx = -1
         for idx, p in enumerate(raw_parts):
@@ -890,7 +1092,6 @@ def iter_olm_records(
             sub_folders = [clean_folder_segment(p) for p in raw_parts[:-1]]
         folder_parts = base_parts + (sub_folders if sub_folders else ["Inbox"])
 
-        # Skip Trash / Deleted Items unless include_deleted is True
         if not include_deleted and any(
             p.lower() in ("trash", "deleted items", "deleted messages") for p in sub_folders
         ):
@@ -1005,7 +1206,231 @@ def iter_olm_records(
             )
 
 
-# ----------------------- 5. MH / Claws / Sylpheed Mailboxes -----------------------
+# ----------------------- 5. Outlook .pst Reader (via MAPI on Windows) -----------------------
+
+def iter_pst_records(
+    pst_path: str,
+    base_folder_parts: Optional[List[str]] = None,
+    include_deleted: bool = False,
+    namespace=None,
+) -> Iterator[MailRecord]:
+    """
+    Read and yield MailRecords from a Microsoft Outlook .pst file via Outlook MAPI.
+    Preserves folder hierarchy, HTML/plain bodies, attachments, inline CIDs, and status flags.
+    """
+    abs_pst = os.path.abspath(pst_path)
+    base_parts = list(base_folder_parts) if base_folder_parts else []
+
+    own_com = False
+    if namespace is None:
+        try:
+            import pythoncom
+            import win32com.client as win32
+            pythoncom.CoInitialize()
+            own_com = True
+            app = win32.Dispatch("Outlook.Application")
+            namespace = app.GetNamespace("MAPI")
+            namespace.Logon("", "", False, True)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Reading .pst files requires Windows with Classic Outlook and pywin32: {exc}"
+            ) from exc
+
+    norm_target = os.path.normcase(os.path.normpath(abs_pst))
+    target_store = None
+    already_mounted = False
+    existing_ids = set()
+
+    for s in namespace.Stores:
+        try:
+            existing_ids.add(s.StoreID)
+            if s.FilePath and os.path.normcase(os.path.normpath(s.FilePath)) == norm_target:
+                target_store = s
+                already_mounted = True
+                break
+        except Exception:
+            pass
+
+    if target_store is None:
+        try:
+            namespace.AddStoreEx(abs_pst, 2)
+        except Exception:
+            namespace.AddStore(abs_pst)
+        for s in namespace.Stores:
+            try:
+                if s.FilePath and os.path.normcase(os.path.normpath(s.FilePath)) == norm_target:
+                    target_store = s
+                    break
+                if s.StoreID not in existing_ids:
+                    target_store = s
+                    break
+            except Exception:
+                pass
+
+    if target_store is None:
+        return
+
+    root_folder = target_store.GetRootFolder()
+    tmpdir = tempfile.mkdtemp(prefix="pst_read_")
+
+    def _walk_pst_folder(folder, rel_parts: List[str]) -> Iterator[MailRecord]:
+        # Skip Deleted Items / Trash unless include_deleted=True
+        if rel_parts and not include_deleted:
+            if rel_parts[-1].lower() in ("deleted items", "trash", "deleted messages"):
+                return
+
+        try:
+            items = folder.Items
+            count = items.Count
+        except Exception:
+            count = 0
+
+        for idx in range(1, count + 1):
+            try:
+                item = items.Item(idx)
+                if getattr(item, "Class", None) != 43:  # 43 = olMail
+                    continue
+
+                is_read = not bool(getattr(item, "UnRead", False))
+                is_flagged = getattr(item, "FlagStatus", 0) == 2
+                is_replied = False
+                is_forwarded = False
+                pa = getattr(item, "PropertyAccessor", None)
+                if pa is not None:
+                    try:
+                        verb = pa.GetProperty("http://schemas.microsoft.com/mapi/proptag/0x10810003")
+                        is_replied = verb in (102, 103)
+                        is_forwarded = verb == 104
+                    except Exception:
+                        pass
+
+                flags = default_flags(
+                    is_read=is_read,
+                    is_replied=is_replied,
+                    is_flagged=is_flagged,
+                    is_forwarded=is_forwarded,
+                    is_deleted=False,
+                )
+
+                msg = EmailMessage()
+                subj = getattr(item, "Subject", "") or ""
+                if subj:
+                    msg["Subject"] = subj
+
+                sender_name = getattr(item, "SenderName", "") or ""
+                sender_email = getattr(item, "SenderEmailAddress", "") or ""
+                if sender_email or sender_name:
+                    msg["From"] = (
+                        email.utils.formataddr((sender_name, sender_email))
+                        if "@" in sender_email
+                        else (sender_name or sender_email)
+                    )
+
+                to_val = getattr(item, "To", "") or ""
+                if to_val:
+                    msg["To"] = to_val.replace(";", ",")
+                cc_val = getattr(item, "CC", "") or ""
+                if cc_val:
+                    msg["Cc"] = cc_val.replace(";", ",")
+                bcc_val = getattr(item, "BCC", "") or ""
+                if bcc_val:
+                    msg["Bcc"] = bcc_val.replace(";", ",")
+
+                dt = getattr(item, "SentOn", None) or getattr(item, "ReceivedTime", None)
+                if isinstance(dt, datetime):
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    msg["Date"] = email.utils.format_datetime(dt)
+
+                if pa is not None:
+                    try:
+                        mid = pa.GetProperty("http://schemas.microsoft.com/mapi/proptag/0x1035001F")
+                        if mid:
+                            msg["Message-ID"] = str(mid)
+                    except Exception:
+                        pass
+
+                msg["X-Mozilla-Status"] = flags_to_mozilla_status_hex(flags)
+
+                body_text = getattr(item, "Body", "") or ""
+                body_html = getattr(item, "HTMLBody", "") or ""
+                if body_text and body_html:
+                    msg.set_content(body_text)
+                    msg.add_alternative(body_html, subtype="html")
+                elif body_html:
+                    msg.set_content(body_html, subtype="html")
+                else:
+                    msg.set_content(body_text)
+
+                atts = getattr(item, "Attachments", None)
+                att_count = getattr(atts, "Count", 0) if atts is not None else 0
+                for a_idx in range(1, att_count + 1):
+                    try:
+                        att = atts.Item(a_idx)
+                        att_fn = sanitize_name(getattr(att, "FileName", "") or f"att_{a_idx}.bin", max_len=80)
+                        tmp_att = os.path.join(tmpdir, f"{idx}_{a_idx}_{att_fn}")
+                        att.SaveAsFile(tmp_att)
+                        with open(tmp_att, "rb") as af:
+                            att_data = af.read()
+                        os.remove(tmp_att)
+                        guessed, _ = mimetypes.guess_type(att_fn)
+                        maintype, subtype = (guessed or "application/octet-stream").split("/", 1)
+                        cid = ""
+                        att_pa = getattr(att, "PropertyAccessor", None)
+                        if att_pa is not None:
+                            try:
+                                cid = str(att_pa.GetProperty("http://schemas.microsoft.com/mapi/proptag/0x3712001F") or "").strip("<>")
+                            except Exception:
+                                cid = ""
+                        if cid:
+                            msg.add_attachment(att_data, maintype=maintype, subtype=subtype, filename=att_fn, cid=f"<{cid}>", disposition="inline")
+                        else:
+                            msg.add_attachment(att_data, maintype=maintype, subtype=subtype, filename=att_fn)
+                    except Exception:
+                        pass
+
+                yield MailRecord(
+                    raw_bytes=msg.as_bytes(policy=policy.SMTP),
+                    folder_parts=base_parts + (rel_parts if rel_parts else ["Inbox"]),
+                    source_name=f"pst_msg_{idx:06d}.eml",
+                    is_deleted=False,
+                    flags=flags,
+                )
+            except Exception:
+                continue
+
+        try:
+            subfolders = folder.Folders
+            sub_count = subfolders.Count
+        except Exception:
+            sub_count = 0
+
+        for s_idx in range(1, sub_count + 1):
+            try:
+                sub = subfolders.Item(s_idx)
+                sub_name = clean_folder_segment(getattr(sub, "Name", "") or f"Folder_{s_idx}")
+                yield from _walk_pst_folder(sub, rel_parts + [sub_name])
+            except Exception:
+                continue
+
+    try:
+        yield from _walk_pst_folder(root_folder, [])
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        if not already_mounted:
+            try:
+                namespace.RemoveStore(root_folder)
+            except Exception:
+                pass
+        if own_com:
+            try:
+                import pythoncom
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+
+
+# ----------------------- 6. MH / Claws / Sylpheed Mailboxes -----------------------
 
 def parse_mh_sequences(seq_file_path: str) -> Dict[str, Set[int]]:
     """
@@ -1043,7 +1468,11 @@ def flags_for_mh_message(msg_num: int, sequences: Dict[str, Set[int]]) -> Tuple[
     is_read = True
     if "unseen" in sequences:
         is_read = msg_num not in sequences["unseen"]
-    is_flagged = msg_num in sequences.get("flagged", set()) or msg_num in sequences.get("tick", set()) or msg_num in sequences.get("mark", set())
+    is_flagged = (
+        msg_num in sequences.get("flagged", set())
+        or msg_num in sequences.get("tick", set())
+        or msg_num in sequences.get("mark", set())
+    )
     is_replied = msg_num in sequences.get("replied", set()) or msg_num in sequences.get("answered", set())
     is_forwarded = msg_num in sequences.get("forwarded", set())
     is_deleted = msg_num in sequences.get("deleted", set())
@@ -1059,7 +1488,7 @@ def flags_for_mh_message(msg_num: int, sequences: Dict[str, Set[int]]) -> Tuple[
     )
 
 
-# ----------------------- 6. MBOX, MMDF, and Babyl Stream Readers -----------------------
+# ----------------------- 7. MBOX, MMDF, and Babyl Stream Readers -----------------------
 
 def is_mbox_from_line(line: bytes) -> bool:
     if not line.startswith(b"From "):
@@ -1116,7 +1545,6 @@ def iter_mbox_stream(
                 in_headers = True
                 msg_lines = []
             elif HEADER_START_RE.match(line):
-                # Fallback if mbox lacks an initial "From " separator
                 in_msg = True
                 in_headers = not (line in (b"\n", b"\r\n"))
                 msg_lines = [line]
@@ -1162,16 +1590,13 @@ def iter_mmdf_stream(
     source_prefix: str = "mmdf",
     include_deleted: bool = False,
 ) -> Iterator[MailRecord]:
-    """
-    Stream messages from an MMDF mailbox file (messages delimited by \\x01\\x01\\x01\\x01 lines).
-    """
+    """Stream messages from an MMDF mailbox file (delimited by \\x01\\x01\\x01\\x01 lines)."""
     msg_lines: List[bytes] = []
     idx = 0
     for line in fp:
         if line.rstrip(b"\r\n") == b"\x01\x01\x01\x01":
             if msg_lines:
-                # Strip optional leading "From " line inside MMDF message block
-                if msg_lines and is_mbox_from_line(msg_lines[0]):
+                if is_mbox_from_line(msg_lines[0]):
                     msg_lines = msg_lines[1:]
                 if msg_lines:
                     idx += 1
@@ -1198,9 +1623,7 @@ def iter_babyl_stream(
     source_prefix: str = "babyl",
     include_deleted: bool = False,
 ) -> Iterator[MailRecord]:
-    """
-    Parse messages from an Emacs Rmail Babyl mailbox (BABYL OPTIONS: ... \\x1f\\x0c ...).
-    """
+    """Parse messages from an Emacs Rmail Babyl mailbox (BABYL OPTIONS: ... \\x1f\\x0c ...)."""
     data = fp.read()
     blocks = data.split(b"\x1f")
     idx = 0
@@ -1212,7 +1635,6 @@ def iter_babyl_stream(
         if not lines:
             continue
 
-        # Line 0 in Babyl is the attribute/label line, e.g. "1, unseen,,\n" or "0, seen, answered,,\n"
         attr_line = lines[0].decode("latin1", errors="replace").lower()
         flags = default_flags(
             is_read=("unseen" not in attr_line),
@@ -1224,7 +1646,6 @@ def iter_babyl_stream(
         if flags["is_deleted"] and not include_deleted:
             continue
 
-        # If '*** EOOH ***' is present, determine whether headers are before or after it
         eooh_idx = -1
         for i, ln in enumerate(lines[1:], start=1):
             if ln.strip() == b"*** EOOH ***":
@@ -1234,7 +1655,6 @@ def iter_babyl_stream(
         if eooh_idx != -1:
             before_eooh = lines[1:eooh_idx]
             after_eooh = lines[eooh_idx + 1 :]
-            # If before_eooh has headers and after_eooh starts with headers too, after_eooh has the display headers + body
             if after_eooh and HEADER_START_RE.match(after_eooh[0]):
                 msg_lines = after_eooh
             else:
@@ -1247,10 +1667,12 @@ def iter_babyl_stream(
             yield _finalize_stream_message(msg_lines, folder_parts, f"{source_prefix}_{idx:06d}.eml", ext_flags=flags)
 
 
-# ----------------------- 7. Format Detection & Unified Dispatcher -----------------------
+# ----------------------- 8. Format Detection & Unified Dispatcher -----------------------
 
 def _sniff_stream_format(header_bytes: bytes) -> str:
     """Sniff the format of a stream from its initial bytes."""
+    if header_bytes.startswith(PST_MAGIC):
+        return "pst"
     if header_bytes.startswith(OLE2_MAGIC):
         return "msg"
     if header_bytes.startswith(b"PK\x03\x04"):
@@ -1270,7 +1692,6 @@ def _sniff_stream_format(header_bytes: bytes) -> str:
         return "emlx"
     if is_mbox_from_line(header_bytes[:first_nl + 1] if first_nl != -1 else header_bytes):
         return "mbox"
-    # Check if multiple "From " separators exist in the initial chunk
     if re.search(rb"(?m)^From \S+ .*\d{4}\r?$", header_bytes):
         return "mbox"
     if HEADER_START_RE.match(header_bytes.lstrip()):
@@ -1329,7 +1750,6 @@ def _iter_records_from_bytes(
         yield from iter_mbox_stream(io.BytesIO(data), folder_parts, os.path.splitext(filename)[0], include_deleted)
         return
 
-    # Treat as single RFC 822 / EML message
     hdr_flags, has_hdr = extract_flags_from_headers(data)
     if ext_flags is not None and not has_hdr:
         flags = ext_flags
@@ -1350,10 +1770,6 @@ def _derive_archive_member_folder_parts(
     member_path: str,
     base_folder_parts: List[str],
 ) -> Tuple[List[str], Optional[Dict[str, bool]]]:
-    """
-    Given a relative path inside a directory or archive, compute clean logical
-    `folder_parts` and any filename-derived flags (e.g. Maildir `:2,FRS`).
-    """
     norm = member_path.replace("\\", "/").strip("/")
     parts = [p for p in norm.split("/") if p]
     if not parts:
@@ -1362,21 +1778,18 @@ def _derive_archive_member_folder_parts(
     fname = parts[-1]
     dir_parts = parts[:-1]
 
-    # Check if inside Maildir cur/ or new/
     if dir_parts and dir_parts[-1].lower() in ("cur", "new"):
         in_new = dir_parts[-1].lower() == "new"
         md_flags, has_md_flags = parse_maildir_flags(fname, in_new=in_new)
         folder_parts = list(base_folder_parts) + normalize_maildir_folder_parts(dir_parts)
         return folder_parts, (md_flags if has_md_flags else None)
 
-    # Check if inside Apple Mail .mbox bundle or .emlx
     if fname.lower().endswith((".emlx", ".partial.emlx")) or any(
         p.lower().endswith((".mbox", ".imapmbox", ".popmbox")) for p in dir_parts
     ):
         folder_parts = list(base_folder_parts) + normalize_apple_mail_folder_parts(dir_parts)
         return folder_parts, None
 
-    # Standard folder tree (including Thunderbird .sbd)
     cleaned = [clean_folder_segment(p) for p in dir_parts]
     folder_parts = list(base_folder_parts) + (cleaned if cleaned else ["Inbox"])
     return folder_parts, None
@@ -1484,7 +1897,7 @@ def iter_file_records(
 ) -> Iterator[MailRecord]:
     """
     Yield MailRecords from a single file on disk (supports .mbox, extensionless mbox,
-    .eml, .emlx, .msg, .olm, MMDF, Babyl, .zip, .tar*, .gz, .bz2, .xz).
+    .eml, .emlx, .msg, .olm, .pst, MMDF, Babyl, .zip, .tar*, .gz, .bz2, .xz).
     """
     lp = win_long_path(file_path)
     try:
@@ -1500,17 +1913,18 @@ def iter_file_records(
 
     default_folder = list(folder_parts) if folder_parts is not None else [clean_folder_segment(os.path.splitext(fname)[0] or "Inbox")]
 
-    # 1. Tar archives (.tar, .tar.gz, .tgz, .tar.bz2, .tar.xz)
+    if low.endswith(".pst"):
+        yield from iter_pst_records(file_path, folder_parts or [], include_deleted=include_deleted)
+        return
+
     if low.endswith((".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")):
         yield from iter_tar_records(file_path, folder_parts or [], include_deleted=include_deleted)
         return
 
-    # 2. ZIP / OLM archives (.zip, .olm)
     if low.endswith((".zip", ".olm")):
         yield from iter_zip_or_olm_records(lp, folder_parts or [], include_deleted=include_deleted)
         return
 
-    # 3. Single-stream compressed files (.gz, .bz2, .xz)
     if low.endswith((".gz", ".bz2", ".xz")):
         open_fn = gzip.open if low.endswith(".gz") else (bz2.open if low.endswith(".bz2") else lzma.open)
         inner_name = os.path.splitext(fname)[0]
@@ -1541,7 +1955,6 @@ def iter_file_records(
             pass
         return
 
-    # 4. Inspect magic / header of uncompressed file
     try:
         with open(lp, "rb") as fp:
             head = fp.read(4096)
@@ -1549,6 +1962,10 @@ def iter_file_records(
         return
 
     fmt = _sniff_stream_format(head)
+
+    if fmt == "pst":
+        yield from iter_pst_records(file_path, folder_parts or [], include_deleted=include_deleted)
+        return
 
     if fmt == "zip":
         yield from iter_zip_or_olm_records(lp, folder_parts or [], include_deleted=include_deleted)
@@ -1595,10 +2012,8 @@ def iter_file_records(
             yield from iter_babyl_stream(fp, default_folder, os.path.splitext(fname)[0], include_deleted)
         return
 
-    # Distinguish single .eml / Maildir / MH message from multi-message mbox
     is_single_msg_ext = low.endswith(".eml") or (ext_flags is not None) or fname.isdigit()
     if not is_single_msg_ext and (low.endswith(".mbox") or fmt == "mbox" or "." not in fname):
-        # In Thunderbird, an extensionless file gets its own folder name!
         mbox_folder = list(folder_parts) if folder_parts is not None else [clean_folder_segment(fname)]
         with open(lp, "rb") as fp:
             yield from iter_mbox_stream(fp, mbox_folder, clean_folder_segment(fname), include_deleted)
@@ -1624,13 +2039,7 @@ def iter_mail_records(
     include_deleted: bool = False,
 ) -> Iterator[MailRecord]:
     """
-    Universal generator yielding MailRecords from any supported file or directory hierarchy:
-      - Standard .mbox, MMDF, Babyl, .olm, .msg, .eml, .emlx, .zip, .tar*, .gz/.bz2/.xz files
-      - Thunderbird ImapMail / Mail directory trees (both mbox and Maildir modes)
-      - Standard Maildir & Maildir++ trees (cur/, new/, .Folder.Subfolder)
-      - Apple Mail *.mbox / *.imapmbox bundles & .emlx trees
-      - MH / Claws Mail / Sylpheed directories (numbered files + .mh_sequences)
-      - Standard .eml / .msg directory trees
+    Universal generator yielding MailRecords from any supported file or directory hierarchy.
     """
     abs_src = os.path.abspath(src_path)
     if os.path.isfile(win_long_path(abs_src)):
@@ -1638,19 +2047,16 @@ def iter_mail_records(
         return
 
     for root, dirs, files in os.walk(win_long_path(abs_src)):
-        # Do not descend into Maildir 'tmp' or macOS '__MACOSX' directories
         dirs[:] = sorted([
             d for d in dirs
             if d.lower() != "tmp" and d != "__MACOSX" and not d.startswith("._")
         ])
         files_sorted = sorted(files)
 
-        # Compute path components relative to abs_src
         clean_root = root[4:] if root.startswith("\\\\?\\") and not abs_src.startswith("\\\\?\\") else root
         rel_dir = os.path.relpath(clean_root, abs_src)
         rel_parts = [] if rel_dir in (".", "") else [p for p in rel_dir.replace("\\", "/").split("/") if p]
 
-        # Case 1: Inside a Maildir 'cur' or 'new' directory
         if rel_parts and rel_parts[-1].lower() in ("cur", "new"):
             in_new = rel_parts[-1].lower() == "new"
             folder_parts = normalize_maildir_folder_parts(rel_parts)
@@ -1669,11 +2075,8 @@ def iter_mail_records(
                 )
             continue
 
-        # Case 2: Check for MH directory (.mh_sequences or numbered files)
         mh_seq_path = os.path.join(clean_root, ".mh_sequences")
         mh_sequences = parse_mh_sequences(mh_seq_path) if os.path.exists(win_long_path(mh_seq_path)) else {}
-
-        # Determine if inside an Apple Mail *.mbox bundle
         in_apple_bundle = any(p.lower().endswith((".mbox", ".imapmbox", ".popmbox")) for p in rel_parts)
 
         for fname in files_sorted:
@@ -1683,7 +2086,6 @@ def iter_mail_records(
 
             fpath = os.path.join(clean_root, fname)
 
-            # Apple Mail .emlx
             if low.endswith((".emlx", ".partial.emlx")) or in_apple_bundle:
                 folder_parts = normalize_apple_mail_folder_parts(rel_parts)
                 yield from iter_file_records(
@@ -1693,7 +2095,6 @@ def iter_mail_records(
                 )
                 continue
 
-            # MH numbered message file
             if fname.isdigit():
                 folder_parts = [clean_folder_segment(p) for p in rel_parts] or ["Inbox"]
                 mh_flags, has_mh = flags_for_mh_message(int(fname), mh_sequences)
@@ -1707,8 +2108,6 @@ def iter_mail_records(
                 )
                 continue
 
-            # Extensionless file or .mbox file inside directory tree:
-            # In Thunderbird/mbox hierarchies, the file itself represents a folder name!
             base_no_ext, ext = os.path.splitext(fname)
             if ext == "" or low.endswith(".mbox") or low.endswith(".mbox.gz"):
                 mbox_leaf = clean_folder_segment(
@@ -1722,7 +2121,6 @@ def iter_mail_records(
                 )
                 continue
 
-            # Standalone .eml, .msg, .olm, .zip, .tar*, .gz/.bz2/.xz
             folder_parts = [clean_folder_segment(p) for p in rel_parts]
             yield from iter_file_records(
                 fpath,

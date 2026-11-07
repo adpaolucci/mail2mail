@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mail2mail"
-version = "2.0.0"
-description = "Universal Email & Mailbox Converter (MBOX, Thunderbird ImapMail/Mail, Maildir/Maildir++, Apple Mail .emlx/.mbox, Outlook .msg/.olm, MH, MMDF, Babyl, EML, and compressed archives -> EML or Outlook PST)"
+version = "2.1.0"
+description = "Universal Email & Mailbox Converter (MBOX, Thunderbird ImapMail/Mail, Maildir/Maildir++, Apple Mail .emlx/.mbox, Outlook .msg/.olm/.pst, MH, MMDF, Babyl, EML, and compressed archives <-> EML, MBOX, or Outlook PST)"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
@@ -17,6 +17,7 @@ keywords = ["email", "mbox", "eml", "pst", "outlook", "thunderbird", "maildir", 
 [project.scripts]
 mail2mail = "mail2mail:main"
 mail2eml = "mail2eml:main"
+mail2mbox = "mail2mbox:main"
 mail2pst = "mail2pst:main"
 
 [tool.setuptools]
@@ -24,9 +25,6 @@ py-modules = [
     "mail_formats",
     "mail2mail",
     "mail2eml",
+    "mail2mbox",
     "mail2pst",
-    "mbox_to_eml_exporter",
-    "imapmail_to_eml",
-    "eml_to_pst_import",
-    "imapmail_to_pst",
 ]
