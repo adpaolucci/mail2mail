@@ -8,12 +8,15 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from datetime import timezone
 from email import policy
+from email.header import decode_header, make_header
 from email.utils import getaddresses, parsedate_to_datetime
 
 try:
     import pythoncom
+    import pywintypes
     import win32com.client
 except Exception:
     print("Error: pywin32 is not installed. Run:  pip install pywin32", file=sys.stderr)
@@ -28,25 +31,26 @@ WINDOWS_RESERVED_NAMES = {
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 }
+IGNORED_DIR_SUFFIXES = ('.mozmsgs', '.wdseml')
 
 # MAPI Property Tags (Unicode 0x001F preferred, ANSI 0x001E fallback)
-PR_TRANSPORT_MESSAGE_HEADERS_W = "http://schemas.microsoft.com/mapi/proptag/0x007D001F"
-PR_TRANSPORT_MESSAGE_HEADERS_A = "http://schemas.microsoft.com/mapi/proptag/0x007D001E"
-PR_MESSAGE_DELIVERY_TIME       = "http://schemas.microsoft.com/mapi/proptag/0x0E060040"
-PR_CLIENT_SUBMIT_TIME          = "http://schemas.microsoft.com/mapi/proptag/0x00390040"
-PR_INTERNET_MESSAGE_ID_W       = "http://schemas.microsoft.com/mapi/proptag/0x1035001F"
-PR_INTERNET_MESSAGE_ID_A       = "http://schemas.microsoft.com/mapi/proptag/0x1035001E"
-PR_ATTACH_CONTENT_ID_W         = "http://schemas.microsoft.com/mapi/proptag/0x3712001F"
-PR_ATTACH_CONTENT_ID_A         = "http://schemas.microsoft.com/mapi/proptag/0x3712001E"
-PR_ATTACH_FLAGS                = "http://schemas.microsoft.com/mapi/proptag/0x37140003"
-PR_SENDER_NAME_W               = "http://schemas.microsoft.com/mapi/proptag/0x0C1A001F"
-PR_SENDER_EMAIL_W              = "http://schemas.microsoft.com/mapi/proptag/0x0C1F001F"
-PR_SENDER_ADDRTYPE_W           = "http://schemas.microsoft.com/mapi/proptag/0x0C1E001F"
-PR_SENT_REPRESENTING_NAME_W    = "http://schemas.microsoft.com/mapi/proptag/0x0042001F"
-PR_SENT_REPRESENTING_EMAIL_W   = "http://schemas.microsoft.com/mapi/proptag/0x0065001F"
+PR_TRANSPORT_MESSAGE_HEADERS_W  = "http://schemas.microsoft.com/mapi/proptag/0x007D001F"
+PR_TRANSPORT_MESSAGE_HEADERS_A  = "http://schemas.microsoft.com/mapi/proptag/0x007D001E"
+PR_MESSAGE_DELIVERY_TIME        = "http://schemas.microsoft.com/mapi/proptag/0x0E060040"
+PR_CLIENT_SUBMIT_TIME           = "http://schemas.microsoft.com/mapi/proptag/0x00390040"
+PR_INTERNET_MESSAGE_ID_W        = "http://schemas.microsoft.com/mapi/proptag/0x1035001F"
+PR_INTERNET_MESSAGE_ID_A        = "http://schemas.microsoft.com/mapi/proptag/0x1035001E"
+PR_ATTACH_CONTENT_ID_W          = "http://schemas.microsoft.com/mapi/proptag/0x3712001F"
+PR_ATTACH_CONTENT_ID_A          = "http://schemas.microsoft.com/mapi/proptag/0x3712001E"
+PR_ATTACH_FLAGS                 = "http://schemas.microsoft.com/mapi/proptag/0x37140003"
+PR_SENDER_NAME_W                = "http://schemas.microsoft.com/mapi/proptag/0x0C1A001F"
+PR_SENDER_EMAIL_W               = "http://schemas.microsoft.com/mapi/proptag/0x0C1F001F"
+PR_SENDER_ADDRTYPE_W            = "http://schemas.microsoft.com/mapi/proptag/0x0C1E001F"
+PR_SENT_REPRESENTING_NAME_W     = "http://schemas.microsoft.com/mapi/proptag/0x0042001F"
+PR_SENT_REPRESENTING_EMAIL_W    = "http://schemas.microsoft.com/mapi/proptag/0x0065001F"
 PR_SENT_REPRESENTING_ADDRTYPE_W = "http://schemas.microsoft.com/mapi/proptag/0x0064001F"
-PR_ICON_INDEX                  = "http://schemas.microsoft.com/mapi/proptag/0x10800003"
-PR_LAST_VERB_EXECUTED          = "http://schemas.microsoft.com/mapi/proptag/0x10810003"
+PR_ICON_INDEX                   = "http://schemas.microsoft.com/mapi/proptag/0x10800003"
+PR_LAST_VERB_EXECUTED           = "http://schemas.microsoft.com/mapi/proptag/0x10810003"
 
 # Thunderbird X-Mozilla-Status bitmask flags (nsMsgMessageFlags.h)
 MSG_FLAG_READ      = 0x0001
@@ -54,6 +58,44 @@ MSG_FLAG_REPLIED   = 0x0002
 MSG_FLAG_MARKED    = 0x0004  # Flagged / Starred
 MSG_FLAG_EXPUNGED  = 0x0008  # Deleted (awaiting folder compaction)
 MSG_FLAG_FORWARDED = 0x1000  # Forwarded
+
+TRANSIENT_COM_HRESULTS = {
+    0x80010001,  # RPC_E_CALL_REJECTED
+    0x800706BA,  # RPC_S_SERVER_UNAVAILABLE
+    0x8001010A,  # RPC_E_SERVERCALL_RETRYLATER
+}
+
+
+def win_long_path(path: str) -> str:
+    """Add \\\\?\\ long-path prefix on Windows when path approaches MAX_PATH (260 chars)."""
+    abspath = os.path.abspath(path)
+    if os.name != "nt" or abspath.startswith("\\\\?\\") or len(abspath) < 240:
+        return path
+    if abspath.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + abspath[2:]
+    return "\\\\?\\" + abspath
+
+
+def com_retry(max_attempts=4, base_delay=0.35):
+    """Retry transient Outlook COM RPC_E_CALL_REJECTED errors with message pumping."""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            last_err = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    pythoncom.PumpWaitingMessages()
+                    return func(*args, **kwargs)
+                except pywintypes.com_error as e:
+                    last_err = e
+                    hr = getattr(e, "hresult", 0) & 0xFFFFFFFF
+                    if hr in TRANSIENT_COM_HRESULTS and attempt < max_attempts:
+                        time.sleep(base_delay * (2 ** (attempt - 1)))
+                        pythoncom.PumpWaitingMessages()
+                        continue
+                    raise
+            raise last_err
+        return wrapper
+    return decorator
 
 
 def set_prop(pa, tag, value):
@@ -66,13 +108,64 @@ def set_prop(pa, tag, value):
 
 
 def to_mapi_utc(pa, dt):
-    """Convert a parsed datetime into a UTC datetime suitable for MAPI PT_SYSTIME."""
+    """
+    Convert a parsed datetime into a naive UTC datetime for MAPI PT_SYSTIME.
+    Note: pywin32 converts timezone-aware datetimes into local system time when
+    constructing VT_DATE, so stripping tzinfo after converting to UTC ensures
+    PropertyAccessor.SetProperty receives exact UTC wall-clock values.
+    """
     try:
         if dt.tzinfo is not None:
-            return dt.astimezone(timezone.utc)
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
         return pa.LocalTimeToUTC(dt)
     except Exception:
-        return dt
+        try:
+            return dt.replace(tzinfo=None)
+        except Exception:
+            return dt
+
+
+def safe_get_header(msg, name: str, default: str = "") -> str:
+    """Safely read a single header from msg without failing on malformed RFC 5322 syntax."""
+    try:
+        val = msg.get(name)
+        if val is not None:
+            return str(val)
+    except Exception:
+        pass
+    try:
+        target = name.lower()
+        for k, raw_v in msg.raw_items():
+            if k.lower() == target:
+                try:
+                    return str(make_header(decode_header(str(raw_v))))
+                except Exception:
+                    return str(raw_v)
+    except Exception:
+        pass
+    return default
+
+
+def safe_get_all_headers(msg, name: str):
+    """Safely read all occurrences of a header from msg as strings."""
+    try:
+        vals = msg.get_all(name)
+        if vals:
+            return [str(v) for v in vals if v is not None]
+    except Exception:
+        pass
+    results = []
+    try:
+        target = name.lower()
+        for k, raw_v in msg.raw_items():
+            if k.lower() == target and raw_v is not None:
+                try:
+                    results.append(str(make_header(decode_header(str(raw_v)))))
+                except Exception:
+                    results.append(str(raw_v))
+    except Exception:
+        pass
+    return results
 
 
 def decode_modified_utf7(name):
@@ -124,6 +217,7 @@ def sanitize_folder_name(name, default="Unnamed_Folder", max_len=120):
     return clean or default
 
 
+@com_retry()
 def get_or_create_subfolder(parent_folder, folder_name):
     """Retrieves an existing MAPI subfolder or creates it if not found."""
     safe_name = sanitize_folder_name(folder_name)
@@ -142,15 +236,16 @@ def is_probable_mbox(file_path):
     basename = os.path.basename(file_path)
     ignored_exts = (
         '.msf', '.dat', '.json', '.html', '.txt', '.ini',
-        '.bak', '.tmp', '.sqlite', '.wdseml', '.mozmsgs'
+        '.bak', '.tmp', '.sqlite', '.wdseml', '.mozmsgs', '.db', '.log'
     )
     if basename.startswith('.') or basename.lower().endswith(ignored_exts):
         return False
 
+    lp = win_long_path(file_path)
     try:
-        if os.path.getsize(file_path) == 0:
+        if os.path.getsize(lp) == 0:
             return True
-        with open(file_path, 'rb') as f:
+        with open(lp, 'rb') as f:
             head = f.read(1024).lstrip()
             return head.startswith(b"From ")
     except Exception:
@@ -168,11 +263,11 @@ def parse_message_flags(parsed_msg):
     is_forwarded = False
     is_expunged = False
 
-    status_hdr = str(parsed_msg.get("Status", "") or "").upper()
+    status_hdr = safe_get_header(parsed_msg, "Status", "").upper()
     if status_hdr:
         is_read = ("R" in status_hdr)
 
-    x_status = str(parsed_msg.get("X-Status", "") or "").upper()
+    x_status = safe_get_header(parsed_msg, "X-Status", "").upper()
     if "F" in x_status:
         is_flagged = True
     if "A" in x_status:
@@ -180,10 +275,10 @@ def parse_message_flags(parsed_msg):
     if "W" in x_status:
         is_forwarded = True
 
-    if str(parsed_msg.get("X-Message-Flag", "") or "").strip():
+    if safe_get_header(parsed_msg, "X-Message-Flag", "").strip():
         is_flagged = True
 
-    tb_status = str(parsed_msg.get("X-Mozilla-Status", "") or "").strip()
+    tb_status = safe_get_header(parsed_msg, "X-Mozilla-Status", "").strip()
     if tb_status:
         try:
             val = int(tb_status, 16)
@@ -221,12 +316,12 @@ def build_headers_text(raw_bytes):
 def add_recipients(mail_item, parsed_msg):
     """Adds To, CC, and BCC recipients to the Outlook MailItem."""
     def _fmt(hdr_name):
-        headers = [str(h) for h in parsed_msg.get_all(hdr_name, [])]
+        headers = safe_get_all_headers(parsed_msg, hdr_name)
         if not headers:
             return ""
         parts = []
         for realname, addr in getaddresses(headers):
-            realname = (realname or "").strip()
+            realname = (realname or "").strip().replace(';', ',')
             addr = (addr or "").strip()
             if realname and addr:
                 parts.append(f"{realname} <{addr}>")
@@ -243,7 +338,7 @@ def add_recipients(mail_item, parsed_msg):
 
 def handle_sender_info(mail_item, parsed_msg):
     """Maps From header using Unicode MAPI PropertyAccessor properties."""
-    from_headers = [str(h) for h in parsed_msg.get_all('from', [])]
+    from_headers = safe_get_all_headers(parsed_msg, "from")
     if from_headers:
         senders = getaddresses(from_headers)
         if senders:
@@ -279,6 +374,7 @@ def _iter_parts_skipping_rfc822_children(msg):
             yield part
 
 
+@com_retry()
 def populate_mailitem(mail_item, parsed, msg_bytes, temp_dir, flags=None):
     """
     Populates a native Outlook MailItem from parsed MIME message and raw bytes.
@@ -287,67 +383,17 @@ def populate_mailitem(mail_item, parsed, msg_bytes, temp_dir, flags=None):
     """
     pa = mail_item.PropertyAccessor
 
-    # 1. Raw Internet Headers & Message-ID
-    raw_headers_text = build_headers_text(msg_bytes)
-    if raw_headers_text:
-        if not set_prop(pa, PR_TRANSPORT_MESSAGE_HEADERS_W, raw_headers_text):
-            set_prop(pa, PR_TRANSPORT_MESSAGE_HEADERS_A, raw_headers_text)
-
-    mid = str(parsed.get("Message-ID", "") or "").strip()
-    if mid:
-        if not set_prop(pa, PR_INTERNET_MESSAGE_ID_W, mid):
-            set_prop(pa, PR_INTERNET_MESSAGE_ID_A, mid)
-
-    # 2. Subject
-    mail_item.Subject = str(parsed.get('subject', '') or '')
-
-    # 3. Sent / Delivery Date (MAPI PT_SYSTIME in UTC; MailItem.SentOn is read-only)
-    try:
-        date_hdr = parsed.get('date')
-        if date_hdr:
-            dt = parsedate_to_datetime(str(date_hdr))
-            if dt is not None:
-                utc_dt = to_mapi_utc(pa, dt)
-                set_prop(pa, PR_MESSAGE_DELIVERY_TIME, utc_dt)
-                set_prop(pa, PR_CLIENT_SUBMIT_TIME, utc_dt)
-    except Exception:
-        pass
-
-    # 4. Sender and Recipients
-    handle_sender_info(mail_item, parsed)
+    # 1. Subject & Recipients
+    mail_item.Subject = safe_get_header(parsed, "subject", "")
     add_recipients(mail_item, parsed)
 
-    # 5. Read / Flagged / Replied / Forwarded Status
-    if flags is None:
-        flags = parse_message_flags(parsed)
-    is_read, is_flagged, is_replied, is_forwarded, _ = flags
-
-    try:
-        mail_item.UnRead = not is_read
-    except Exception:
-        pass
-
-    if is_flagged:
-        try:
-            mail_item.FlagStatus = 2  # olFlagMarked
-            mail_item.FlagRequest = "Follow up"
-        except Exception:
-            pass
-
-    if is_replied:
-        set_prop(pa, PR_LAST_VERB_EXECUTED, 102)
-        set_prop(pa, PR_ICON_INDEX, 261)
-    elif is_forwarded:
-        set_prop(pa, PR_LAST_VERB_EXECUTED, 104)
-        set_prop(pa, PR_ICON_INDEX, 262)
-
-    # 6. S/MIME Detection (only opaque pkcs7-mime lacks a readable MIME body)
+    # 2. S/MIME Detection (only opaque pkcs7-mime lacks a readable MIME body)
     content_type = parsed.get_content_type().lower()
     is_opaque_smime = ("pkcs7-mime" in content_type or "signed-data" in content_type)
     if is_opaque_smime:
         mail_item.MessageClass = "IPM.Note.SMIME"
 
-    # 7. Body Extraction (track body_parts so inline bodies are not re-added as attachments)
+    # 3. Body Extraction (track body_parts so inline bodies are not re-added as attachments)
     body_parts = set()
     html_body = None
     text_body = None
@@ -382,15 +428,18 @@ def populate_mailitem(mail_item, parsed, msg_bytes, temp_dir, flags=None):
                 except Exception:
                     pass
 
-    # 8. Extract Attachments and Inline CID Assets
+    # 4. Extract Attachments and Inline CID Assets
     for att_idx, part in enumerate(_iter_parts_skipping_rfc822_children(parsed), 1):
         if id(part) in body_parts:
             continue
 
         part_ctype = part.get_content_type().lower()
-        cdisp = str(part.get("Content-Disposition", "") or "").lower()
-        cid = part.get("Content-ID", None)
-        filename = part.get_filename()
+        cdisp = safe_get_header(part, "Content-Disposition", "").lower()
+        cid = safe_get_header(part, "Content-ID", "") or None
+        try:
+            filename = part.get_filename()
+        except Exception:
+            filename = None
 
         is_rfc822 = (part_ctype == "message/rfc822")
         is_attachment = ("attachment" in cdisp) or (filename is not None) or is_rfc822
@@ -429,9 +478,11 @@ def populate_mailitem(mail_item, parsed, msg_bytes, temp_dir, flags=None):
                 ext = mimetypes.guess_extension(part_ctype) or ".bin"
                 filename = f"attachment_{att_idx}{ext}"
 
-        safe_filename = sanitize_folder_name(filename, default=f"file_{att_idx}.bin", max_len=120)
-        slot_dir = os.path.join(temp_dir, f"att_slot_{att_idx}")
+        slot_dir = os.path.abspath(os.path.join(temp_dir, f"s_{att_idx}"))
         os.makedirs(slot_dir, exist_ok=True)
+        # Keep total path length safely under Windows MAX_PATH (260 chars) for Outlook COM
+        max_fn_len = max(24, min(120, 230 - len(slot_dir)))
+        safe_filename = sanitize_folder_name(filename, default=f"file_{att_idx}.bin", max_len=max_fn_len)
         temp_att_path = os.path.realpath(os.path.join(slot_dir, safe_filename))
 
         try:
@@ -457,7 +508,7 @@ def populate_mailitem(mail_item, parsed, msg_bytes, temp_dir, flags=None):
         finally:
             shutil.rmtree(slot_dir, ignore_errors=True)
 
-    # 9. Set Body after attachments so inline CID references resolve properly
+    # 5. Set Body after attachments so inline CID references resolve properly
     if html_body is not None:
         mail_item.HTMLBody = html_body
     elif text_body is not None:
@@ -465,14 +516,62 @@ def populate_mailitem(mail_item, parsed, msg_bytes, temp_dir, flags=None):
     elif not is_opaque_smime:
         mail_item.Body = ""
 
-    # 10. Commit changes to PST store
+    # 6. Read / Flagged / Replied / Forwarded Status
+    if flags is None:
+        flags = parse_message_flags(parsed)
+    is_read, is_flagged, is_replied, is_forwarded, _ = flags
+
+    try:
+        mail_item.UnRead = not is_read
+    except Exception:
+        pass
+
+    if is_flagged:
+        try:
+            mail_item.FlagStatus = 2  # olFlagMarked
+            mail_item.FlagRequest = "Follow up"
+        except Exception:
+            pass
+
+    # 7. Low-level MAPI properties set after Body/HTMLBody so OOM body sync does not reset them
+    raw_headers_text = build_headers_text(msg_bytes)
+    if raw_headers_text:
+        if not set_prop(pa, PR_TRANSPORT_MESSAGE_HEADERS_W, raw_headers_text):
+            set_prop(pa, PR_TRANSPORT_MESSAGE_HEADERS_A, raw_headers_text)
+
+    mid = safe_get_header(parsed, "Message-ID", "").strip()
+    if mid:
+        if not set_prop(pa, PR_INTERNET_MESSAGE_ID_W, mid):
+            set_prop(pa, PR_INTERNET_MESSAGE_ID_A, mid)
+
+    handle_sender_info(mail_item, parsed)
+
+    try:
+        date_hdr = safe_get_header(parsed, "date", "").strip()
+        if date_hdr:
+            dt = parsedate_to_datetime(date_hdr)
+            if dt is not None:
+                utc_dt = to_mapi_utc(pa, dt)
+                set_prop(pa, PR_MESSAGE_DELIVERY_TIME, utc_dt)
+                set_prop(pa, PR_CLIENT_SUBMIT_TIME, utc_dt)
+    except Exception:
+        pass
+
+    if is_replied:
+        set_prop(pa, PR_LAST_VERB_EXECUTED, 102)
+        set_prop(pa, PR_ICON_INDEX, 261)
+    elif is_forwarded:
+        set_prop(pa, PR_LAST_VERB_EXECUTED, 104)
+        set_prop(pa, PR_ICON_INDEX, 262)
+
+    # 8. Commit changes to PST store
     mail_item.Save()
 
 
 def import_mbox_to_outlook(mbox_path, outlook_folder, temp_dir, include_deleted=False):
     """Processes an mbox file and adds messages directly into the destination Outlook folder."""
-    if os.path.getsize(mbox_path) == 0:
-        return
+    if os.path.getsize(win_long_path(mbox_path)) == 0:
+        return 0, 0
 
     print(f"[*] Processing: {os.path.basename(mbox_path)} -> [{outlook_folder.Name}]")
 
@@ -480,7 +579,7 @@ def import_mbox_to_outlook(mbox_path, outlook_folder, temp_dir, include_deleted=
         mbox = mailbox.mbox(mbox_path, create=False)
     except Exception as e:
         print(f"    [!] Error opening mbox {mbox_path}: {e}")
-        return
+        return 0, 0
 
     count = 0
     skipped_deleted = 0
@@ -518,30 +617,48 @@ def import_mbox_to_outlook(mbox_path, outlook_folder, temp_dir, include_deleted=
     if skipped_deleted:
         summary += f" ({skipped_deleted} deleted/expunged skipped)"
     print(summary + ".")
+    return count, skipped_deleted
 
 
 def traverse_and_convert(current_dir, current_outlook_folder, temp_dir, include_deleted=False):
-    """Recursively walks through Thunderbird mbox files and .sbd directories."""
+    """Recursively walks through Thunderbird mbox files, .sbd directories, and account folders."""
     try:
-        entries = sorted(os.listdir(current_dir))
+        entries = sorted(os.listdir(win_long_path(current_dir)))
     except Exception as e:
         print(f"[!] Access error reading {current_dir}: {e}")
-        return
+        return 0, 0
+
+    total_imported = 0
+    total_skipped = 0
 
     # Process MBOX files
     for entry in entries:
         full_path = os.path.join(current_dir, entry)
-        if os.path.isfile(full_path) and is_probable_mbox(full_path):
+        if os.path.isfile(win_long_path(full_path)) and is_probable_mbox(full_path):
             target_folder = get_or_create_subfolder(current_outlook_folder, entry)
-            import_mbox_to_outlook(full_path, target_folder, temp_dir, include_deleted=include_deleted)
+            c, s = import_mbox_to_outlook(
+                full_path, target_folder, temp_dir, include_deleted=include_deleted
+            )
+            total_imported += c
+            total_skipped += s
 
-    # Process .sbd container folders
+    # Process .sbd container folders and account subdirectories
     for entry in entries:
         full_path = os.path.join(current_dir, entry)
-        if os.path.isdir(full_path) and entry.lower().endswith(".sbd"):
-            parent_folder_name = entry[:-4]
-            nested_outlook_folder = get_or_create_subfolder(current_outlook_folder, parent_folder_name)
-            traverse_and_convert(full_path, nested_outlook_folder, temp_dir, include_deleted=include_deleted)
+        if not os.path.isdir(win_long_path(full_path)):
+            continue
+        lower = entry.lower()
+        if entry.startswith('.') or lower.endswith(IGNORED_DIR_SUFFIXES):
+            continue
+        parent_folder_name = entry[:-4] if lower.endswith(".sbd") else entry
+        nested_outlook_folder = get_or_create_subfolder(current_outlook_folder, parent_folder_name)
+        c, s = traverse_and_convert(
+            full_path, nested_outlook_folder, temp_dir, include_deleted=include_deleted
+        )
+        total_imported += c
+        total_skipped += s
+
+    return total_imported, total_skipped
 
 
 def main():
@@ -552,9 +669,9 @@ def main():
             except Exception:
                 pass
     ap = argparse.ArgumentParser(
-        description="Convert a Thunderbird ImapMail/Mail account directory directly into an Outlook PST file."
+        description="Convert a Thunderbird ImapMail/Mail directory (or single mbox) directly into an Outlook PST file."
     )
-    ap.add_argument("imap_src", help="Path to Thunderbird ImapMail account directory")
+    ap.add_argument("imap_src", help="Path to Thunderbird ImapMail/Mail directory or a single mbox file")
     ap.add_argument("pst_dest", help="Output .pst file path")
     ap.add_argument(
         "--include-deleted",
@@ -566,8 +683,8 @@ def main():
     imap_src = os.path.abspath(args.imap_src)
     pst_dest = os.path.abspath(args.pst_dest)
 
-    if not os.path.isdir(imap_src):
-        print(f"[!] Source path does not exist or is not a directory: {imap_src}")
+    if not os.path.exists(win_long_path(imap_src)):
+        print(f"[!] Source path does not exist: {imap_src}", file=sys.stderr)
         sys.exit(1)
 
     os.makedirs(os.path.dirname(pst_dest), exist_ok=True)
@@ -614,16 +731,29 @@ def main():
                 continue
 
     if not target_store:
-        print("[!] Error: Could not locate the newly attached PST store.")
+        print("[!] Error: Could not locate the newly attached PST store.", file=sys.stderr)
         sys.exit(1)
 
     pst_root = target_store.GetRootFolder()
     print(f"[+] PST Root opened: {pst_root.Name}")
 
-    temp_staging = tempfile.mkdtemp(prefix="tb_pst_conv_")
+    temp_staging = tempfile.mkdtemp(prefix="tb_pst_")
 
     try:
-        traverse_and_convert(imap_src, pst_root, temp_staging, include_deleted=args.include_deleted)
+        if os.path.isfile(win_long_path(imap_src)):
+            folder_name = os.path.splitext(os.path.basename(imap_src))[0]
+            target_folder = get_or_create_subfolder(pst_root, folder_name)
+            total_imported, total_skipped = import_mbox_to_outlook(
+                imap_src, target_folder, temp_staging, include_deleted=args.include_deleted
+            )
+        else:
+            total_imported, total_skipped = traverse_and_convert(
+                imap_src, pst_root, temp_staging, include_deleted=args.include_deleted
+            )
+        print(
+            f"\n[+] Total imported: {total_imported:,}"
+            + (f" ({total_skipped:,} deleted/expunged skipped)" if total_skipped else "")
+        )
     finally:
         print("[*] Cleaning temporary staging directory...")
         shutil.rmtree(temp_staging, ignore_errors=True)
@@ -635,6 +765,7 @@ def main():
             print(f"[!] Notice during PST unmount: {e}")
 
         try:
+            gc.collect()
             pythoncom.CoUninitialize()
         except Exception:
             pass

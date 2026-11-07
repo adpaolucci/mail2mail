@@ -6,6 +6,7 @@
 #   - --max-per-dir N: cap number of files per directory (0 = no limit)
 #   - --max-dir-bytes GB: cap total size per directory in GB (0 = no limit)
 #   - --sanitize-filenames: make file names safe for Windows/macOS
+#   - --include-deleted: include messages marked expunged (0x0008) in Thunderbird X-Mozilla-Status
 #   - periodic progress logs and final stats
 #
 # Example:
@@ -34,9 +35,22 @@ WINDOWS_RESERVED_NAMES = {
 }
 
 
+def win_long_path(path: str) -> str:
+    """Add \\\\?\\ long-path prefix on Windows when path approaches MAX_PATH (260 chars)."""
+    abspath = os.path.abspath(path)
+    if os.name != "nt" or abspath.startswith("\\\\?\\") or len(abspath) < 240:
+        return path
+    if abspath.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + abspath[2:]
+    return "\\\\?\\" + abspath
+
+
 def get_header_str(msg, name: str, default: str = "") -> str:
     """Safely extract and decode an RFC 2047 header into a plain string."""
-    raw_val = msg.get(name)
+    try:
+        raw_val = msg.get(name)
+    except Exception:
+        raw_val = None
     if raw_val is None:
         return default
     try:
@@ -61,7 +75,7 @@ def is_thunderbird_expunged(msg) -> bool:
 
 
 def safe_name(s: str, max_len: int = 100) -> str:
-    """Return a filesystem-friendly string (safe for Windows/macOS)."""
+    """Return a filesystem-friendly string stem (safe for Windows/macOS/Linux)."""
     if not isinstance(s, str):
         s = str(s or "")
     s = re.sub(r'[\x00-\x1f\x7f\\/:*?"<>|]+', '_', s)
@@ -74,7 +88,7 @@ def safe_name(s: str, max_len: int = 100) -> str:
 
 
 def ensure_dir(path: str) -> str:
-    os.makedirs(path, exist_ok=True)
+    os.makedirs(win_long_path(path), exist_ok=True)
     return path
 
 
@@ -141,10 +155,10 @@ def main():
 
     mbox_path = os.path.normpath(args.mbox)
     out_root  = os.path.normpath(args.out_dir)
-    if not os.path.isfile(mbox_path):
+    if not os.path.isfile(win_long_path(mbox_path)):
         print(f"Error: .mbox file not found: {mbox_path}", file=sys.stderr)
         sys.exit(1)
-    os.makedirs(out_root, exist_ok=True)
+    ensure_dir(out_root)
 
     max_dir_bytes = int(args.max_dir_bytes * (1024**3)) if args.max_dir_bytes and args.max_dir_bytes > 0 else 0
 
@@ -155,9 +169,9 @@ def main():
         print(f"Messages in MBOX: {total:,}")
 
         # Directory trackers
-        dir_counts = {}   # path → int
-        dir_bytes  = {}   # path → int
-        active_part = {}  # base_dir → current part int
+        dir_counts = {}   # path -> int
+        dir_bytes  = {}   # path -> int
+        active_part = {}  # base_dir -> current part int
 
         exported = 0
         skipped = 0
@@ -209,7 +223,7 @@ def main():
             dest_path = os.path.join(dest_dir, fname)
 
             try:
-                with open(dest_path, 'wb') as f:
+                with open(win_long_path(dest_path), 'wb') as f:
                     f.write(raw)
                 dir_counts[dest_dir] = c + 1
                 dir_bytes[dest_dir]  = b + size

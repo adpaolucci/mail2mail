@@ -1,58 +1,62 @@
-# MBOX / Thunderbird ImapMail → EML → PST Toolkit
+# MBOX & Thunderbird ImapMail → EML → PST Toolkit
 
-Export large `.mbox` mailboxes or Thunderbird `ImapMail` account hierarchies into filesystem `.eml` files and import them into Outlook **.pst** archives — with folder hierarchy preservation, Thunderbird read/flagged/replied status mapping, year/month layouts, filters, size limits, progress logs, and safe Outlook MAPI integration.
-
-## Scripts Included
-
-- **`mbox_to_eml_exporter.py`**: Single `.mbox` → `.eml` folders (`year`, `month`, or `flat` layout)
-- **`imapmail_to_eml.py`**: Thunderbird `ImapMail` / `Mail` account tree (`.sbd` subfolders & mbox files) → `.eml` folder tree
-- **`eml_to_pst_import.py`**: `.eml` folder tree → Outlook `.pst` archive(s) (with subfolder preservation, year/byte splitting, and size rotation)
-- **`imapmail_to_pst.py`**: Thunderbird `ImapMail` / `Mail` account tree → single Outlook `.pst` archive directly
-
-> Designed for multi-tens-of-GB mailboxes. Avoids the “Drafts” pitfall by creating items **directly** in the target PST folder (`folder.Items.Add(0)`).
+Export large `.mbox` mailboxes or full Mozilla Thunderbird `ImapMail` / `Mail` profile trees into `.eml` files and import them into Microsoft Outlook **.pst** archives with full folder hierarchy preservation, Thunderbird message state mapping, size/year splitting, and resilient Outlook MAPI integration.
 
 ---
 
-## Features
+## Included Scripts
 
-**MBOX / ImapMail → EML**
-- Single `.mbox` export (`mbox_to_eml_exporter.py`) with **year**, **month** (`YYYY/MM`), or **flat** layouts
-- Full Thunderbird `ImapMail` hierarchy export (`imapmail_to_eml.py`) with `.sbd` subfolder traversal and **IMAP Modified UTF-7** folder name decoding
-- Accurately parses Thunderbird `X-Mozilla-Status` bitmasks (`0x0001` Read, `0x0002` Replied, `0x0004` Flagged/Starred, `0x0008` Expunged/Deleted, `0x1000` Forwarded)
-- Automatically skips expunged/deleted messages (`0x0008`) unless `--include-deleted` is specified
-- Year range filters (`--start-year`, `--end-year`) and per-directory caps (**max files** or **max GB**)
-- Safe RFC 2047 header decoding and Windows/macOS filename sanitization
+| Script | Purpose | Requires Outlook? |
+| :--- | :--- | :--- |
+| [`mbox_to_eml_exporter.py`](file:///c:/Users/andre/Desktop/all2pst/mbox_to_eml_exporter.py) | Export a single `.mbox` file into `.eml` directories (`year`, `month`, or `flat` layout) with date filters and per-directory file/size caps | No (Stdlib only) |
+| [`imapmail_to_eml.py`](file:///c:/Users/andre/Desktop/all2pst/imapmail_to_eml.py) | Stream a Thunderbird `ImapMail` / `Mail` directory (or `.mbox` file) into a 1:1 `.eml` folder tree, decoding IMAP Modified UTF-7 names and normalizing status headers | No (Stdlib only) |
+| [`eml_to_pst_import.py`](file:///c:/Users/andre/Desktop/all2pst/eml_to_pst_import.py) | Import a directory tree of `.eml` files into one or more Outlook `.pst` files (split by year, even-split into `N` parts, or auto-rotated at `--max-pst-gb`) | Yes (`pywin32`) |
+| [`imapmail_to_pst.py`](file:///c:/Users/andre/Desktop/all2pst/imapmail_to_pst.py) | Directly convert a Thunderbird `ImapMail` / `Mail` directory (or single `.mbox` file) into an Outlook `.pst` archive | Yes (`pywin32`) |
 
-**EML / ImapMail → PST (Outlook MAPI)**
-- Mirrors source subfolder hierarchy inside the PST (or flat mode via `--flatten`)
-- Preserves **Read/Unread**, **Follow-up Flag**, **Replied/Forwarded icons**, **UTC Delivery/Submit timestamps**, **Unicode Sender/Recipient properties**, **Internet Message-ID**, **Transport Headers**, and **Inline CID images**
-- Split by **year** (one PST per year) or even-split into **N PSTs by bytes**
-- **Max PST size** (e.g., 15–20 GB) with auto-rotate to `…_part2.pst`, `…_part3.pst`
-- Safe periodic **flush** (detach/reattach without deleting data) so Windows Explorer refreshes file growth
+---
+
+## Key Capabilities & Hardening
+
+- **Full Folder Hierarchy Preservation**
+  - Traverses Thunderbird `.sbd` subfolder containers, account folders (`ImapMail`, `Mail/Local Folders`), and single `.mbox` files.
+  - Decodes RFC 3501 **IMAP Modified UTF-7** folder names (e.g., `Notes &- Invoices` → `Notes & Invoices`, `Caf&AOk-` → `Café`).
+  - Mirrors relative folder structures inside target `.pst` archives (or imports flat when `--flatten` is specified).
+- **Accurate Thunderbird `X-Mozilla-Status` Bitmask Mapping**
+  - Maps `0x0001` (`Read`), `0x0002` (`Replied`), `0x0004` (`Marked` / Flagged), `0x0008` (`Expunged` / Deleted), and `0x1000` (`Forwarded`).
+  - Automatically skips uncompacted deleted/expunged (`0x0008`) messages by default (override with `--include-deleted`).
+  - Preserves Read/Unread state (`MailItem.UnRead`), Follow-up Flags (`FlagStatus = olFlagMarked`), and Replied/Forwarded icons (`PR_LAST_VERB_EXECUTED`, `PR_ICON_INDEX`).
+- **High-Fidelity Outlook MAPI Property Injection**
+  - Creates items directly in the destination PST folder (`folder.Items.Add(0)`) so items never land in the default profile's `Drafts` folder.
+  - Injects naive UTC `PT_SYSTIME` timestamps into `PR_MESSAGE_DELIVERY_TIME` (`0x0E060040`) and `PR_CLIENT_SUBMIT_TIME` (`0x00390040`) after body population so Outlook preserves exact sent/received dates.
+  - Populates Unicode MAPI sender and representing properties (`0x0C1A001F`, `0x0C1F001F`, `0x0042001F`, `0x0065001F`), `PR_INTERNET_MESSAGE_ID_W` (`0x1035001F`), and `PR_TRANSPORT_MESSAGE_HEADERS_W` (`0x007D001F`).
+  - Preserves inline `cid:` HTML images (`PR_ATTACH_CONTENT_ID_W` + `PR_ATTACH_FLAGS = 4`), `text/*` file attachments (`.csv`, `.txt`, `.ics`), and embedded `message/rfc822` forwarded emails with original filenames intact.
+- **Large-Archive Reliability**
+  - Automatic COM retry backoff with `pythoncom.PumpWaitingMessages()` when Outlook returns `RPC_E_CALL_REJECTED` (`0x80010001`).
+  - Windows `\\?\` long-path support for deep folder trees and dynamic `MAX_PATH` protection for Outlook COM attachment staging.
+  - Non-destructive `--flush-every` PST detach/re-attach cycle to force Windows Explorer file size updates without losing data.
 
 ---
 
 ## Requirements
 
-- **Windows** with classic **Microsoft Outlook** desktop (M365 / 2021 / 2019 / 2016) for `.pst` creation
 - **Python 3.9+**
-- Python package: `pywin32` (required for PST scripts; EML exporters use only the Python standard library)
+- **Windows** with classic **Microsoft Outlook** desktop (M365 / 2021 / 2019 / 2016) for `.pst` import scripts (`eml_to_pst_import.py` and `imapmail_to_pst.py`)
+- `pywin32`:
 
 ```bash
 pip install -r requirements.txt
 ```
 
----
-
-## Outlook Tips
-- Put Outlook in **Work Offline** during imports.
-- Ensure a default Outlook profile opens without prompts.
-- Don’t browse/move items inside the target PST while the script runs.
-- If Windows Explorer shows PST ~256 KB while attached, that’s normal; the script detaches PSTs at the end (and on `--flush-every`) so the OS updates file size.
+### Outlook Preparation Tips
+1. Ensure classic desktop Outlook has a default mail profile configured that opens without modal prompts.
+2. Put Outlook in **Work Offline** mode while running large imports.
+3. Avoid browsing or moving items inside the target `.pst` in Outlook while the import is active.
 
 ---
 
-## 1) Export MBOX → EML (`mbox_to_eml_exporter.py`)
+## Usage Guide
+
+### 1) Export Single MBOX → EML (`mbox_to_eml_exporter.py`)
 
 ```cmd
 python mbox_to_eml_exporter.py ^
@@ -62,35 +66,34 @@ python mbox_to_eml_exporter.py ^
   --sanitize-filenames
 ```
 
-### Common layouts
-- `--layout year` → `Export_EML\YYYY\*.eml`
-- `--layout month` → `Export_EML\YYYY\MM\*.eml`
-- `--layout flat` → `Export_EML\*.eml`
-
-### Year filters & folder limits
-```cmd
-:: Only 2007–2016
-python mbox_to_eml_exporter.py --mbox "D:\Mail\inbox.mbox" --out-dir "D:\Export_EML" --layout year --start-year 2007 --end-year 2016
-
-:: Cap folders at 50k files OR ~9 GB
-python mbox_to_eml_exporter.py --mbox "D:\Mail\inbox.mbox" --out-dir "D:\Export_EML" --layout month --max-per-dir 50000 --max-dir-bytes 9
-```
+**Options:**
+- `--layout {year,month,flat}`: Organize exported `.eml` files into `YYYY`, `YYYY\MM`, or flat directories (default: `year`).
+- `--start-year YYYY` / `--end-year YYYY`: Filter messages by `Date` header year (inclusive).
+- `--max-per-dir N`: Roll over to `__part2`, `__part3`, etc. when a directory reaches `N` files (`0` = unlimited).
+- `--max-dir-bytes GB`: Roll over when a directory reaches `GB` gigabytes (`0` = unlimited).
+- `--include-deleted`: Export messages marked as expunged (`0x0008`) in `X-Mozilla-Status`.
+- `--progress-every N`: Print progress every `N` messages (default: `1000`).
 
 ---
 
-## 2) Export Thunderbird ImapMail → EML (`imapmail_to_eml.py`)
+### 2) Export Thunderbird ImapMail / Mail → EML (`imapmail_to_eml.py`)
+
+Point `imap_src` at an account folder (`...\ImapMail\imap.example.com`), the parent `ImapMail` or `Mail` folder, or a single `.mbox` file:
 
 ```cmd
-python imapmail_to_eml.py "C:\Users\<User>\AppData\Roaming\Thunderbird\Profiles\xxx.default\ImapMail\imap.example.com" "D:\Export_EML"
+python imapmail_to_eml.py ^
+  "C:\Users\<User>\AppData\Roaming\Thunderbird\Profiles\xxx.default\ImapMail\imap.example.com" ^
+  "D:\Export_EML"
 ```
 
-Pass `--include-deleted` if you want to export uncompacted messages marked as deleted (`0x0008`) in Thunderbird.
+**Options:**
+- `--include-deleted`: Export uncompacted messages marked as expunged (`0x0008`) in `X-Mozilla-Status`.
 
 ---
 
-## 3) Import EML → PST (`eml_to_pst_import.py`)
+### 3) Import EML Tree → PST (`eml_to_pst_import.py`)
 
-### Split by year, cap 15 GB per PST
+#### Split by Year (one PST per year, auto-rotating at 15 GB)
 ```cmd
 python eml_to_pst_import.py ^
   --src "D:\Export_EML" ^
@@ -103,7 +106,7 @@ python eml_to_pst_import.py ^
   --count-every 200
 ```
 
-### Even-split into N PSTs by total size (no per-year split)
+#### Even-Split into N PSTs by Total Size
 ```cmd
 python eml_to_pst_import.py ^
   --src "D:\Export_EML" ^
@@ -114,20 +117,35 @@ python eml_to_pst_import.py ^
   --pst-root "Imported (EML)"
 ```
 
-### Useful flags
-- `--split-by year` or `--splits N`
-- `--max-pst-gb 15` (rotate to `part2` when exceeded)
-- `--pst-root "Imported (EML)"` (top folder inside each PST; pass `""` to place folders directly at PST root)
-- `--flatten` (place all messages directly in `--pst-root` without recreating relative subfolders)
-- `--overwrite-pst` (delete and recreate target PST if it already exists on disk)
-- `--include-deleted` (import messages marked expunged in `X-Mozilla-Status`)
-- `--flush-every N` (detaches and re-attaches the active PST every `N` items so Explorer refreshes file size)
-- `--count-every N` (prints Outlook folder item counts)
+**Options:**
+- `--split-by year`: Create one PST per message year (`<base>_<YYYY>_part1.pst`).
+- `--splits N`: Divide total `.eml` byte volume across `N` sequential PST files (`<base>_part1.pst`, …).
+- `--max-pst-gb GB`: Maximum size in GB per PST before rotating to the next part (default: `15.0`).
+- `--pst-root NAME`: Top-level folder inside each PST (default: `"Imported (EML)"`; pass `""` to place folders directly at the PST root).
+- `--flatten`: Place all messages directly inside `--pst-root` without recreating source subfolders.
+- `--overwrite-pst`: Delete and recreate target PST files if they already exist on disk.
+- `--include-deleted`: Import messages marked expunged (`0x0008`) in `X-Mozilla-Status`.
+- `--flush-every N`: Detach and re-attach the current PST every `N` items so Windows Explorer updates file size (`0` = off).
+- `--count-every N`: Print live folder item count every `N` items (default: `200`, `0` = off).
 
 ---
 
-## 4) Direct Thunderbird ImapMail → PST (`imapmail_to_pst.py`)
+### 4) Direct Thunderbird ImapMail / Mail → PST (`imapmail_to_pst.py`)
 
 ```cmd
-python imapmail_to_pst.py "C:\Users\<User>\AppData\Roaming\Thunderbird\Profiles\xxx.default\ImapMail\imap.example.com" "D:\PSTs\Mailbox.pst"
+python imapmail_to_pst.py ^
+  "C:\Users\<User>\AppData\Roaming\Thunderbird\Profiles\xxx.default\ImapMail\imap.example.com" ^
+  "D:\PSTs\Mailbox.pst"
 ```
+
+**Options:**
+- `--include-deleted`: Import uncompacted messages marked as expunged (`0x0008`) in `X-Mozilla-Status`.
+
+---
+
+## Troubleshooting
+
+- ** PST file size appears stuck at ~265 KB in Windows Explorer while running**
+  - Outlook holds an open write handle on mounted `.pst` files and flushes metadata on unmount. The scripts automatically detach all PST stores in their `finally` blocks (and during `--flush-every`), at which point Explorer shows the final size.
+- **Classic Outlook vs. "New Outlook"**
+  - The web-based "New Outlook" for Windows does not support MAPI/COM automation (`Outlook.Application`). Switch to classic desktop Outlook before running `eml_to_pst_import.py` or `imapmail_to_pst.py`.

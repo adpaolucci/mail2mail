@@ -58,6 +58,7 @@ import sys
 import time
 from datetime import timezone
 from email import policy
+from email.header import decode_header, make_header
 from email.parser import BytesParser
 from email.utils import getaddresses, parsedate_to_datetime
 
@@ -70,23 +71,23 @@ except Exception:
     sys.exit(1)
 
 # --- MAPI property tags (Unicode 0x001F preferred, ANSI 0x001E fallback) -----
-PR_TRANSPORT_MESSAGE_HEADERS_W = "http://schemas.microsoft.com/mapi/proptag/0x007D001F"
-PR_TRANSPORT_MESSAGE_HEADERS_A = "http://schemas.microsoft.com/mapi/proptag/0x007D001E"
-PR_MESSAGE_DELIVERY_TIME       = "http://schemas.microsoft.com/mapi/proptag/0x0E060040"
-PR_CLIENT_SUBMIT_TIME          = "http://schemas.microsoft.com/mapi/proptag/0x00390040"
-PR_INTERNET_MESSAGE_ID_W       = "http://schemas.microsoft.com/mapi/proptag/0x1035001F"
-PR_INTERNET_MESSAGE_ID_A       = "http://schemas.microsoft.com/mapi/proptag/0x1035001E"
-PR_SENDER_NAME_W               = "http://schemas.microsoft.com/mapi/proptag/0x0C1A001F"
-PR_SENDER_EMAIL_ADDRESS_W      = "http://schemas.microsoft.com/mapi/proptag/0x0C1F001F"
-PR_SENDER_ADDRTYPE_W           = "http://schemas.microsoft.com/mapi/proptag/0x0C1E001F"
-PR_SENT_REPRESENTING_NAME_W    = "http://schemas.microsoft.com/mapi/proptag/0x0042001F"
-PR_SENT_REPRESENTING_EMAIL_W   = "http://schemas.microsoft.com/mapi/proptag/0x0065001F"
+PR_TRANSPORT_MESSAGE_HEADERS_W  = "http://schemas.microsoft.com/mapi/proptag/0x007D001F"
+PR_TRANSPORT_MESSAGE_HEADERS_A  = "http://schemas.microsoft.com/mapi/proptag/0x007D001E"
+PR_MESSAGE_DELIVERY_TIME        = "http://schemas.microsoft.com/mapi/proptag/0x0E060040"
+PR_CLIENT_SUBMIT_TIME           = "http://schemas.microsoft.com/mapi/proptag/0x00390040"
+PR_INTERNET_MESSAGE_ID_W        = "http://schemas.microsoft.com/mapi/proptag/0x1035001F"
+PR_INTERNET_MESSAGE_ID_A        = "http://schemas.microsoft.com/mapi/proptag/0x1035001E"
+PR_SENDER_NAME_W                = "http://schemas.microsoft.com/mapi/proptag/0x0C1A001F"
+PR_SENDER_EMAIL_ADDRESS_W       = "http://schemas.microsoft.com/mapi/proptag/0x0C1F001F"
+PR_SENDER_ADDRTYPE_W            = "http://schemas.microsoft.com/mapi/proptag/0x0C1E001F"
+PR_SENT_REPRESENTING_NAME_W     = "http://schemas.microsoft.com/mapi/proptag/0x0042001F"
+PR_SENT_REPRESENTING_EMAIL_W    = "http://schemas.microsoft.com/mapi/proptag/0x0065001F"
 PR_SENT_REPRESENTING_ADDRTYPE_W = "http://schemas.microsoft.com/mapi/proptag/0x0064001F"
-PR_ATTACH_CONTENT_ID_W         = "http://schemas.microsoft.com/mapi/proptag/0x3712001F"
-PR_ATTACH_CONTENT_ID_A         = "http://schemas.microsoft.com/mapi/proptag/0x3712001E"
-PR_ATTACH_FLAGS                = "http://schemas.microsoft.com/mapi/proptag/0x37140003"
-PR_ICON_INDEX                  = "http://schemas.microsoft.com/mapi/proptag/0x10800003"
-PR_LAST_VERB_EXECUTED          = "http://schemas.microsoft.com/mapi/proptag/0x10810003"
+PR_ATTACH_CONTENT_ID_W          = "http://schemas.microsoft.com/mapi/proptag/0x3712001F"
+PR_ATTACH_CONTENT_ID_A          = "http://schemas.microsoft.com/mapi/proptag/0x3712001E"
+PR_ATTACH_FLAGS                 = "http://schemas.microsoft.com/mapi/proptag/0x37140003"
+PR_ICON_INDEX                   = "http://schemas.microsoft.com/mapi/proptag/0x10800003"
+PR_LAST_VERB_EXECUTED           = "http://schemas.microsoft.com/mapi/proptag/0x10810003"
 
 # Thunderbird X-Mozilla-Status bitmask flags (nsMsgMessageFlags.h)
 MSG_FLAG_READ      = 0x0001
@@ -102,6 +103,45 @@ WINDOWS_RESERVED_NAMES = {
     *(f"LPT{i}" for i in range(1, 10)),
 }
 
+# Transient COM RPC errors when Outlook is busy
+TRANSIENT_COM_HRESULTS = {
+    0x80010001,  # RPC_E_CALL_REJECTED
+    0x800706BA,  # RPC_S_SERVER_UNAVAILABLE
+    0x8001010A,  # RPC_E_SERVERCALL_RETRYLATER
+}
+
+
+def win_long_path(path: str) -> str:
+    """Add \\\\?\\ long-path prefix on Windows when path approaches MAX_PATH (260 chars)."""
+    abspath = os.path.abspath(path)
+    if os.name != "nt" or abspath.startswith("\\\\?\\") or len(abspath) < 240:
+        return path
+    if abspath.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + abspath[2:]
+    return "\\\\?\\" + abspath
+
+
+def com_retry(max_attempts=4, base_delay=0.35):
+    """Retry transient Outlook COM RPC_E_CALL_REJECTED errors with message pumping."""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            last_err = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    pythoncom.PumpWaitingMessages()
+                    return func(*args, **kwargs)
+                except pywintypes.com_error as e:
+                    last_err = e
+                    hr = getattr(e, "hresult", 0) & 0xFFFFFFFF
+                    if hr in TRANSIENT_COM_HRESULTS and attempt < max_attempts:
+                        time.sleep(base_delay * (2 ** (attempt - 1)))
+                        pythoncom.PumpWaitingMessages()
+                        continue
+                    raise
+            raise last_err
+        return wrapper
+    return decorator
+
 
 def set_prop(pa, tag, value):
     """Safely set a MAPI property; swallow COM-specific errors."""
@@ -113,13 +153,64 @@ def set_prop(pa, tag, value):
 
 
 def to_mapi_utc(pa, dt):
-    """Convert a parsed datetime into a UTC datetime suitable for MAPI PT_SYSTIME."""
+    """
+    Convert a parsed datetime into a naive UTC datetime for MAPI PT_SYSTIME.
+    Note: pywin32 converts timezone-aware datetimes into local system time when
+    constructing VT_DATE, so stripping tzinfo after converting to UTC ensures
+    PropertyAccessor.SetProperty receives exact UTC wall-clock values.
+    """
     try:
         if dt.tzinfo is not None:
-            return dt.astimezone(timezone.utc)
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
         return pa.LocalTimeToUTC(dt)
     except Exception:
-        return dt
+        try:
+            return dt.replace(tzinfo=None)
+        except Exception:
+            return dt
+
+
+def safe_get_header(msg, name: str, default: str = "") -> str:
+    """Safely read a single header from msg without failing on malformed RFC 5322 syntax."""
+    try:
+        val = msg.get(name)
+        if val is not None:
+            return str(val)
+    except Exception:
+        pass
+    try:
+        target = name.lower()
+        for k, raw_v in msg.raw_items():
+            if k.lower() == target:
+                try:
+                    return str(make_header(decode_header(str(raw_v))))
+                except Exception:
+                    return str(raw_v)
+    except Exception:
+        pass
+    return default
+
+
+def safe_get_all_headers(msg, name: str):
+    """Safely read all occurrences of a header from msg as strings."""
+    try:
+        vals = msg.get_all(name)
+        if vals:
+            return [str(v) for v in vals if v is not None]
+    except Exception:
+        pass
+    results = []
+    try:
+        target = name.lower()
+        for k, raw_v in msg.raw_items():
+            if k.lower() == target and raw_v is not None:
+                try:
+                    results.append(str(make_header(decode_header(str(raw_v)))))
+                except Exception:
+                    results.append(str(raw_v))
+    except Exception:
+        pass
+    return results
 
 
 def decode_modified_utf7(name):
@@ -168,13 +259,15 @@ def sanitize_name(name, default="Unnamed", max_len=120):
     return clean or default
 
 
-def addresses_to_str(value):
+def addresses_to_str(values):
     """Normalize RFC822 addresses into Outlook-friendly 'Name <addr>; ...' string."""
-    if not value:
+    if not values:
         return ""
+    if isinstance(values, str):
+        values = [values]
     parts = []
-    for name, addr in getaddresses([str(value)]):
-        name = (name or "").strip()
+    for name, addr in getaddresses(values):
+        name = (name or "").strip().replace(';', ',')
         addr = (addr or "").strip()
         if addr and name:
             parts.append(f"{name} <{addr}>")
@@ -197,12 +290,12 @@ def extract_message_flags(msg):
     is_expunged = False
 
     # 1. Standard Status header (e.g., 'RO' = read, 'O' = unread)
-    status_hdr = str(msg.get("Status", "") or "").upper()
+    status_hdr = safe_get_header(msg, "Status", "").upper()
     if status_hdr:
         is_read = ("R" in status_hdr)
 
     # 2. Standard X-Status header ('F' = flagged, 'A' = answered/replied, 'W' = forwarded)
-    x_status = str(msg.get("X-Status", "") or "").upper()
+    x_status = safe_get_header(msg, "X-Status", "").upper()
     if "F" in x_status:
         is_flagged = True
     if "A" in x_status:
@@ -211,11 +304,11 @@ def extract_message_flags(msg):
         is_forwarded = True
 
     # 3. X-Message-Flag header
-    if str(msg.get("X-Message-Flag", "") or "").strip():
+    if safe_get_header(msg, "X-Message-Flag", "").strip():
         is_flagged = True
 
     # 4. Thunderbird X-Mozilla-Status bitmask
-    tb_status = str(msg.get("X-Mozilla-Status", "") or "").strip()
+    tb_status = safe_get_header(msg, "X-Mozilla-Status", "").strip()
     if tb_status:
         try:
             val = int(tb_status, 16)
@@ -273,8 +366,12 @@ def pick_body(msg):
                 # Do not descend into attached message/rfc822 for the parent body
                 continue
             ctype = part.get_content_type()
-            disp = str(part.get("Content-Disposition") or "").lower()
-            if "attachment" in disp or part.get_filename():
+            disp = safe_get_header(part, "Content-Disposition", "").lower()
+            try:
+                has_fn = bool(part.get_filename())
+            except Exception:
+                has_fn = False
+            if "attachment" in disp or has_fn:
                 continue
             if ctype == "text/html" and html is None:
                 body_parts.add(id(part))
@@ -352,9 +449,12 @@ def add_attachments(mail, msg, tmpdir, body_parts=None):
             continue
 
         ctype = part.get_content_type()
-        disp = str(part.get("Content-Disposition") or "").lower()
-        cid = part.get("Content-ID")
-        fn = part.get_filename()
+        disp = safe_get_header(part, "Content-Disposition", "").lower()
+        cid = safe_get_header(part, "Content-ID", "") or None
+        try:
+            fn = part.get_filename()
+        except Exception:
+            fn = None
 
         is_rfc822 = (ctype == "message/rfc822")
         is_explicit_att = ("attachment" in disp) or (fn is not None) or is_rfc822
@@ -391,9 +491,11 @@ def add_attachments(mail, msg, tmpdir, body_parts=None):
                 ext = mimetypes.guess_extension(ctype or "") or ".bin"
                 fn = f"attachment_{count + 1}{ext}"
 
-        safe_fn = sanitize_name(fn, default=f"attachment_{count + 1}.bin", max_len=120)
-        slot_dir = os.path.join(tmpdir, f"s_{time.time_ns()}_{count}")
+        slot_dir = os.path.abspath(os.path.join(tmpdir, f"s_{count}"))
         os.makedirs(slot_dir, exist_ok=True)
+        # Keep total path length safely under Windows MAX_PATH (260 chars) for Outlook COM
+        max_fn_len = max(24, min(120, 230 - len(slot_dir)))
+        safe_fn = sanitize_name(fn, default=f"attachment_{count + 1}.bin", max_len=max_fn_len)
         p = os.path.join(slot_dir, safe_fn)
 
         try:
@@ -435,27 +537,52 @@ def build_headers_text(raw_bytes):
         return ""
 
 
+@com_retry()
 def create_mail_in_dest(dest_folder, msg, raw_headers_text, tmpdir):
     """
     Create MailItem directly in the target PST folder (avoids default Drafts),
-    populate MAPI properties, attachments, and body.
+    populate OOM fields, attachments, body, and MAPI properties.
     """
     mail = dest_folder.Items.Add(0)  # 0 = olMailItem
     pa   = mail.PropertyAccessor
 
-    # Raw headers first (helps with PR_TRANSPORT_MESSAGE_HEADERS)
+    # 1. Basic OOM fields
+    mail.Subject = safe_get_header(msg, "Subject", "")
+    mail.To  = addresses_to_str(safe_get_all_headers(msg, "To"))
+    mail.CC  = addresses_to_str(safe_get_all_headers(msg, "Cc"))
+    mail.BCC = addresses_to_str(safe_get_all_headers(msg, "Bcc"))
+
+    # 2. Extract body & add attachments before setting HTMLBody so inline CIDs link cleanly
+    html, text, body_parts = pick_body(msg)
+    add_attachments(mail, msg, tmpdir, body_parts=body_parts)
+
+    if html is not None:
+        mail.HTMLBody = html
+    elif text is not None:
+        mail.Body = text
+    else:
+        mail.Body = ""
+
+    # 3. Read / Flagged / Replied / Forwarded states
+    is_read, is_flagged, is_replied, is_forwarded, _ = extract_message_flags(msg)
+    try:
+        mail.UnRead = not is_read
+    except Exception:
+        pass
+
+    if is_flagged:
+        try:
+            mail.FlagStatus = 2  # olFlagMarked
+            mail.FlagRequest = "Follow up"
+        except Exception:
+            pass
+
+    # 4. Low-level MAPI properties set after Body/HTMLBody so OOM body sync does not reset them
     if raw_headers_text:
         if not set_prop(pa, PR_TRANSPORT_MESSAGE_HEADERS_W, raw_headers_text):
             set_prop(pa, PR_TRANSPORT_MESSAGE_HEADERS_A, raw_headers_text)
 
-    # Basic fields
-    mail.Subject = str(msg.get("Subject", "") or "")
-    mail.To  = addresses_to_str(msg.get("To", ""))
-    mail.CC  = addresses_to_str(msg.get("Cc", ""))
-    mail.BCC = addresses_to_str(msg.get("Bcc", ""))
-
-    # Sender metadata (Unicode MAPI properties improve fidelity in Outlook inspector)
-    from_list = getaddresses([str(msg.get("From", "") or "")])
+    from_list = getaddresses(safe_get_all_headers(msg, "From"))
     if from_list:
         name, addr = (from_list[0][0] or "").strip(), (from_list[0][1] or "").strip()
         display = name or addr or ""
@@ -470,16 +597,16 @@ def create_mail_in_dest(dest_folder, msg, raw_headers_text, tmpdir):
         except Exception:
             pass
 
-    mid = str(msg.get("Message-ID", "") or "").strip()
+    mid = safe_get_header(msg, "Message-ID", "").strip()
     if mid:
         if not set_prop(pa, PR_INTERNET_MESSAGE_ID_W, mid):
             set_prop(pa, PR_INTERNET_MESSAGE_ID_A, mid)
 
-    # Dates (convert to UTC for MAPI PT_SYSTIME)
     sent_dt = None
-    if msg.get("Date"):
+    date_str = safe_get_header(msg, "Date", "").strip()
+    if date_str:
         try:
-            sent_dt = parsedate_to_datetime(str(msg.get("Date")))
+            sent_dt = parsedate_to_datetime(date_str)
         except Exception:
             pass
     if sent_dt:
@@ -487,37 +614,12 @@ def create_mail_in_dest(dest_folder, msg, raw_headers_text, tmpdir):
         set_prop(pa, PR_MESSAGE_DELIVERY_TIME, utc_dt)
         set_prop(pa, PR_CLIENT_SUBMIT_TIME, utc_dt)
 
-    # Read / Flagged / Replied / Forwarded states
-    is_read, is_flagged, is_replied, is_forwarded, _ = extract_message_flags(msg)
-    try:
-        mail.UnRead = not is_read
-    except Exception:
-        pass
-
-    if is_flagged:
-        try:
-            mail.FlagStatus = 2  # olFlagMarked
-            mail.FlagRequest = "Follow up"
-        except Exception:
-            pass
-
     if is_replied:
         set_prop(pa, PR_LAST_VERB_EXECUTED, 102)  # EXCHIVERB_REPLYTOSENDER
         set_prop(pa, PR_ICON_INDEX, 261)          # Mail replied icon
     elif is_forwarded:
         set_prop(pa, PR_LAST_VERB_EXECUTED, 104)  # EXCHIVERB_FORWARD
         set_prop(pa, PR_ICON_INDEX, 262)          # Mail forwarded icon
-
-    # Extract body & add attachments
-    html, text, body_parts = pick_body(msg)
-    _, has_cid = add_attachments(mail, msg, tmpdir, body_parts=body_parts)
-
-    if html is not None:
-        mail.HTMLBody = html
-    elif text is not None:
-        mail.Body = text
-    else:
-        mail.Body = ""
 
     return mail
 
@@ -615,6 +717,7 @@ def create_or_attach_pst(ns, desired_path, overwrite=False):
     raise RuntimeError(f"Failed to create/attach PST: {desired_path}")
 
 
+@com_retry()
 def get_or_create_folder_path(root_folder, pst_root_name, rel_dir):
     """Navigate or create pst_root_name and any relative subfolder segments inside root_folder."""
     curr = root_folder
@@ -679,20 +782,29 @@ class PstRouter:
             except Exception:
                 pass
 
+    def _initial_existing_bytes(self, desired_path):
+        if not self.overwrite and os.path.isfile(desired_path):
+            try:
+                return os.path.getsize(desired_path)
+            except OSError:
+                return 0
+        return 0
+
     def _rotate_new(self):
         # Detach previous sequential part so Outlook flushes it immediately
         if self.cur.get("path"):
             self._detach_path(self.cur["path"])
         self.cur["part"] += 1
         desired = self._new_path(f"part{self.cur['part']}")
+        init_bytes = self._initial_existing_bytes(desired)
         store, root, actual = create_or_attach_pst(self.ns, desired, overwrite=self.overwrite)
-        self.cur.update({"store": store, "root": root, "path": actual, "bytes": 0})
+        self.cur.update({"store": store, "root": root, "path": actual, "bytes": init_bytes})
         self._register_open(actual, root)
         print(f"\nUSING PST: {actual}")
         return store, root, actual
 
     def _need_rotate_seq(self, incoming):
-        if self.cur["store"] and (self.cur["bytes"] + incoming > self.max_bytes):
+        if self.cur["store"] and self.cur["bytes"] > 0 and (self.cur["bytes"] + incoming > self.max_bytes):
             return True
         if self.target_bytes and self.cur["store"] and (self.cur["bytes"] >= self.target_bytes):
             return True
@@ -702,17 +814,19 @@ class PstRouter:
         s = self.year.get(year)
         if s is None:
             desired = self._new_path(f"{year}_part1")
+            init_bytes = self._initial_existing_bytes(desired)
             store, root, actual = create_or_attach_pst(self.ns, desired, overwrite=self.overwrite)
-            s = {"path": actual, "store": store, "root": root, "bytes": 0, "part": 1}
+            s = {"path": actual, "store": store, "root": root, "bytes": init_bytes, "part": 1}
             self.year[year] = s
             self._register_open(actual, root)
             print(f"\nUSING PST ({year}): {actual}")
-        elif s["bytes"] + incoming > self.max_bytes:
+        elif s["bytes"] > 0 and (s["bytes"] + incoming > self.max_bytes):
             self._detach_path(s.get("path"))
             s["part"] += 1
             desired = self._new_path(f"{year}_part{s['part']}")
+            init_bytes = self._initial_existing_bytes(desired)
             store, root, actual = create_or_attach_pst(self.ns, desired, overwrite=self.overwrite)
-            s.update({"path": actual, "store": store, "root": root, "bytes": 0})
+            s.update({"path": actual, "store": store, "root": root, "bytes": init_bytes})
             self._register_open(actual, root)
             print(f"\nROTATED PST ({year}) -> {actual}")
         return s
@@ -756,12 +870,13 @@ def list_eml_files(root_dir):
     """Return [(path, size)], total_bytes – recursively collects *.eml."""
     files = []
     total_bytes = 0
-    for base, _, fnames in os.walk(root_dir):
+    for base, _, fnames in os.walk(win_long_path(root_dir)):
+        clean_base = base[4:] if base.startswith("\\\\?\\") and not base.startswith("\\\\?\\UNC\\") else base
         for fn in fnames:
             if fn.lower().endswith(".eml"):
-                p = os.path.join(base, fn)
+                p = os.path.join(clean_base, fn)
                 try:
-                    sz = os.path.getsize(p)
+                    sz = os.path.getsize(win_long_path(p))
                 except OSError:
                     sz = 0
                 files.append((p, sz))
@@ -832,7 +947,7 @@ def main():
 
             # Read raw bytes & parse message
             try:
-                with open(path, "rb") as f:
+                with open(win_long_path(path), "rb") as f:
                     raw = f.read()
             except Exception as e:
                 print(f"\n[WARN] Could not read {path}: {e}")
@@ -852,8 +967,9 @@ def main():
             # Year hint (used when --split-by year)
             year = 1970
             try:
-                if msg.get("Date"):
-                    dt = parsedate_to_datetime(str(msg.get("Date")))
+                date_str = safe_get_header(msg, "Date", "").strip()
+                if date_str:
+                    dt = parsedate_to_datetime(date_str)
                     if dt is not None and 1900 <= dt.year <= 2100:
                         year = dt.year
             except Exception:
@@ -870,7 +986,6 @@ def main():
 
             # Create item directly in destination folder, add attachments, save
             try:
-                pythoncom.PumpWaitingMessages()
                 item = create_mail_in_dest(dest, msg, build_headers_text(raw), tmpdir)
                 item.Save()
 
@@ -930,6 +1045,7 @@ def main():
         except Exception as e:
             print("\n[WARN] Failed to close stores:", e)
         try:
+            gc.collect()
             pythoncom.CoUninitialize()
         except Exception:
             pass
