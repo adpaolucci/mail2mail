@@ -50,6 +50,7 @@ from mail_formats import (
 )
 from mail_audit import AuditLogger, AuditRecord, compute_sha256, perform_dry_run
 from mail_filter import DateFilter, FolderFilter, MigrationState, parse_size_bytes
+from mail_shutdown import ShutdownController
 
 _HEADER_PARSER = email.parser.BytesHeaderParser()
 
@@ -114,6 +115,7 @@ def export_to_eml(
     dedup: str = "none",
     resume: Optional[Any] = None,
     parse_gmail: bool = True,
+    shutdown: Optional[ShutdownController] = None,
 ) -> Tuple[int, int, Dict[str, int], Dict[str, int]]:
     """
     Export messages from any supported format into .eml files.
@@ -122,6 +124,7 @@ def export_to_eml(
     ensure_dir(out_root)
     max_dir_bytes = int(max_dir_gb * (1024**3)) if max_dir_gb and max_dir_gb > 0 else 0
 
+    controller = shutdown or ShutdownController.get_active()
     date_filter = DateFilter(since=since, until=until, start_year=start_year, end_year=end_year)
     folder_filter = FolderFilter(include_patterns=include_folders, exclude_patterns=exclude_folders)
     state = MigrationState(state_file) if state_file else None
@@ -158,6 +161,13 @@ def export_to_eml(
 
     try:
         for i, rec in enumerate(iter_mail_records(src_path, include_deleted=True, parse_gmail=parse_gmail), 1):
+            if controller and controller.is_interrupted:
+                if logger:
+                    logger.warn(f"Graceful stop initiated: {controller.interruption_reason}")
+                break
+            if controller:
+                controller.check_pause()
+
             raw = rec.raw_bytes
             folder_display = os.sep.join(rec.folder_parts) if rec.folder_parts else "Root"
 
@@ -433,10 +443,16 @@ def export_to_eml(
                 else:
                     print(f"Processed {i:,} | exported: {exported:,} | skipped: {skipped:,} | {rate:.1f} msg/s")
 
+    except KeyboardInterrupt:
+        if controller:
+            controller.request_stop("KeyboardInterrupt (Ctrl+C)")
+        elif logger:
+            logger.warn("Interrupted by user (Ctrl+C)")
     finally:
         if state:
             state.close()
 
+    is_halted = bool(controller and controller.is_interrupted)
     if logger:
         logger.print_reconciliation_summary(
             source=src_path,
@@ -452,6 +468,15 @@ def export_to_eml(
             skipped_duplicate=skipped_duplicate,
             skipped_folder=skipped_folder,
             skipped_state=skipped_state,
+            interrupted=is_halted,
+            interruption_reason=controller.interruption_reason if controller else "",
+        )
+
+    if is_halted and controller:
+        controller.print_resumption_banner(
+            resume_file=logger.audit_log_path if logger else None,
+            state_file=state_file,
+            tool="eml",
         )
 
     return exported, skipped, dir_counts, dir_bytes
@@ -574,34 +599,41 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
         verbose=args.verbose,
     )
 
-    try:
-        logger.info(f"[*] Source: {src_path}")
-        logger.info(f"[*] Output directory: {out_root} (layout={layout}, naming={args.naming})")
+    with ShutdownController(tool_name="mail2eml", logger=logger) as shutdown:
+        try:
+            logger.info(f"[*] Source: {src_path}")
+            logger.info(f"[*] Output directory: {out_root} (layout={layout}, naming={args.naming})")
 
-        exported, skipped, dir_counts, dir_bytes = export_to_eml(
-            src_path=src_path,
-            out_root=out_root,
-            layout=layout,
-            naming=args.naming,
-            start_year=args.start_year,
-            end_year=args.end_year,
-            since=args.since,
-            until=args.until,
-            include_folders=args.include_folders,
-            exclude_folders=args.exclude_folders,
-            state_file=args.state_file,
-            max_per_dir=args.max_per_dir,
-            max_dir_gb=max_dir_gb,
-            include_deleted=args.include_deleted,
-            normalize_headers=True,
-            progress_every=args.progress_every,
-            logger=logger,
-            dedup=args.dedup,
-            resume=args.resume,
-            parse_gmail=not args.no_gmail_labels,
-        )
-    finally:
-        logger.close()
+            exported, skipped, dir_counts, dir_bytes = export_to_eml(
+                src_path=src_path,
+                out_root=out_root,
+                layout=layout,
+                naming=args.naming,
+                start_year=args.start_year,
+                end_year=args.end_year,
+                since=args.since,
+                until=args.until,
+                include_folders=args.include_folders,
+                exclude_folders=args.exclude_folders,
+                state_file=args.state_file,
+                max_per_dir=args.max_per_dir,
+                max_dir_gb=max_dir_gb,
+                include_deleted=args.include_deleted,
+                normalize_headers=True,
+                progress_every=args.progress_every,
+                logger=logger,
+                dedup=args.dedup,
+                resume=args.resume,
+                parse_gmail=not args.no_gmail_labels,
+                shutdown=shutdown,
+            )
+            if shutdown.is_interrupted:
+                sys.exit(130)
+        except KeyboardInterrupt:
+            shutdown.request_stop("KeyboardInterrupt (Ctrl+C)")
+            sys.exit(130)
+        finally:
+            logger.close()
 
 
 if __name__ == "__main__":

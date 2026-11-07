@@ -73,6 +73,7 @@ from mail_formats import (
 )
 from mail_audit import AuditLogger, AuditRecord, compute_sha256, perform_dry_run
 from mail_filter import DateFilter, FolderFilter, MigrationState, parse_size_bytes
+from mail_shutdown import ShutdownController
 
 parse_message_flags = extract_message_flags
 sanitize_folder_name = sanitize_name
@@ -1149,9 +1150,19 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
             f"       To prevent Outlook COM error 0x8004011D (PST file size limit), consider using --out-dir with --max-pst-gb 15.0 or --split-by year."
         )
 
+    shutdown = ShutdownController(tool_name="mail2pst", logger=logger)
+    shutdown.install()
+
     try:
         logger.info(f"Source: {src} | Estimated size: {total_bytes / 1e9:,.2f} GB")
         for rec in iter_mail_records(src, include_deleted=True, parse_gmail=not args.no_gmail_labels):
+            if shutdown.is_interrupted:
+                if not logger.quiet:
+                    sys.stdout.write(f"\n[!] Stopping PST import gracefully: {shutdown.interruption_reason}\n")
+                    sys.stdout.flush()
+                break
+            shutdown.check_pause()
+
             raw = rec.raw_bytes
             sz = len(raw)
             processed += 1
@@ -1492,27 +1503,66 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
                     )
                     sys.stdout.flush()
 
-        if processed == 0:
+        if processed == 0 and not shutdown.is_interrupted:
             print("No supported email messages found in source.", file=sys.stderr)
             sys.exit(1)
 
-        logger.print_reconciliation_summary(
-            source=src,
-            target=single_pst_path or out_dir,
-            start_time=start,
-            total_scanned=processed,
-            exported=imported,
-            skipped_date=skipped_date,
-            skipped_deleted=skipped_deleted,
-            failed=skipped - skipped_date - skipped_deleted - skipped_duplicate - skipped_folder - skipped_state,
-            total_bytes=done_bytes,
-            extra_details={"Target PST Location": single_pst_path or out_dir},
-            skipped_duplicate=skipped_duplicate,
-            skipped_folder=skipped_folder,
-            skipped_state=skipped_state,
+        if processed > 0 or not shutdown.is_interrupted:
+            logger.print_reconciliation_summary(
+                source=src,
+                target=single_pst_path or out_dir,
+                start_time=start,
+                total_scanned=processed,
+                exported=imported,
+                skipped_date=skipped_date,
+                skipped_deleted=skipped_deleted,
+                failed=skipped - skipped_date - skipped_deleted - skipped_duplicate - skipped_folder - skipped_state,
+                total_bytes=done_bytes,
+                extra_details={"Target PST Location": single_pst_path or out_dir},
+                skipped_duplicate=skipped_duplicate,
+                skipped_folder=skipped_folder,
+                skipped_state=skipped_state,
+                interrupted=shutdown.is_interrupted,
+                interruption_reason=shutdown.interruption_reason,
+            )
+
+        if shutdown.is_interrupted:
+            shutdown.print_resumption_banner(
+                resume_file=logger.audit_log_path if logger else None,
+                state_file=args.state_file,
+                tool="pst",
+            )
+            sys.exit(130)
+
+    except KeyboardInterrupt:
+        shutdown.request_stop("KeyboardInterrupt (Ctrl+C)")
+        if processed > 0:
+            logger.print_reconciliation_summary(
+                source=src,
+                target=single_pst_path or out_dir,
+                start_time=start,
+                total_scanned=processed,
+                exported=imported,
+                skipped_date=skipped_date,
+                skipped_deleted=skipped_deleted,
+                failed=skipped - skipped_date - skipped_deleted - skipped_duplicate - skipped_folder - skipped_state,
+                total_bytes=done_bytes,
+                extra_details={"Target PST Location": single_pst_path or out_dir},
+                skipped_duplicate=skipped_duplicate,
+                skipped_folder=skipped_folder,
+                skipped_state=skipped_state,
+                interrupted=True,
+                interruption_reason=shutdown.interruption_reason,
+            )
+        shutdown.print_resumption_banner(
+            resume_file=logger.audit_log_path if logger else None,
+            state_file=args.state_file,
+            tool="pst",
         )
+        sys.exit(130)
 
     finally:
+        shutdown.restore()
         logger.close()
         shutil.rmtree(tmpdir, ignore_errors=True)
         if state:

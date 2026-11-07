@@ -54,6 +54,7 @@ from mail_formats import (
 )
 from mail_audit import AuditLogger, AuditRecord, compute_sha256, perform_dry_run
 from mail_filter import DateFilter, FolderFilter, MigrationState, parse_size_bytes
+from mail_shutdown import ShutdownController
 
 MBOXRD_BODY_FROM_RE = re.compile(rb"^(>*From )", re.MULTILINE)
 MBOX_FILE_EXTS = (".mbox", ".mbx", ".mbox.gz", ".mbox.bz2", ".mbox.xz")
@@ -334,6 +335,7 @@ def export_to_mbox(
     dedup: str = "none",
     resume: Optional[Any] = None,
     parse_gmail: bool = True,
+    shutdown: Optional[ShutdownController] = None,
 ) -> Tuple[int, int]:
     """
     Universal converter that streams any supported mailbox format via
@@ -342,6 +344,7 @@ def export_to_mbox(
     """
     parser = BytesParser(policy=policy.default)
     pool = MboxWriterPool(max_gb=max_mbox_gb, overwrite=overwrite)
+    controller = shutdown or ShutdownController.get_active()
     date_filter = DateFilter(since=since, until=until, start_year=start_year, end_year=end_year)
     folder_filter = FolderFilter(include_patterns=include_folders, exclude_patterns=exclude_folders)
     state = MigrationState(state_file) if state_file else None
@@ -374,6 +377,13 @@ def export_to_mbox(
 
     try:
         for idx, rec in enumerate(iter_mail_records(src_path, include_deleted=True, parse_gmail=parse_gmail), 1):
+            if controller and controller.is_interrupted:
+                if logger:
+                    logger.warn(f"Graceful stop initiated: {controller.interruption_reason}")
+                break
+            if controller:
+                controller.check_pause()
+
             raw_bytes = rec.raw_bytes
             folder_display = os.sep.join(rec.folder_parts) if rec.folder_parts else "Root"
             if not raw_bytes:
@@ -627,6 +637,11 @@ def export_to_mbox(
                     sys.stdout.flush()
                 elif not logger:
                     print(f"\rExported {written:,} messages (skipped {skipped:,})...", end="", flush=True)
+    except KeyboardInterrupt:
+        if controller:
+            controller.request_stop("KeyboardInterrupt (Ctrl+C)")
+        elif logger:
+            logger.warn("Interrupted by user (Ctrl+C)")
     finally:
         pool.close_all()
         if state:
@@ -635,6 +650,7 @@ def export_to_mbox(
     if written >= 250 and (not logger or not logger.quiet):
         print()
 
+    is_halted = bool(controller and controller.is_interrupted)
     if logger:
         logger.print_reconciliation_summary(
             source=src_path,
@@ -649,6 +665,15 @@ def export_to_mbox(
             skipped_duplicate=skipped_duplicate,
             skipped_folder=skipped_folder,
             skipped_state=skipped_state,
+            interrupted=is_halted,
+            interruption_reason=controller.interruption_reason if controller else "",
+        )
+
+    if is_halted and controller:
+        controller.print_resumption_banner(
+            resume_file=logger.audit_log_path if logger else None,
+            state_file=state_file,
+            tool="mbox",
         )
 
     return written, skipped
@@ -764,32 +789,39 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
         verbose=args.verbose,
     )
 
-    try:
-        logger.info(f"Starting mail2mbox export from: {src}")
-        logger.info(f"Destination: {target} ({'single file' if single_file_mode else f'directory, layout={args.layout}'})")
+    with ShutdownController(tool_name="mail2mbox", logger=logger) as shutdown:
+        try:
+            logger.info(f"Starting mail2mbox export from: {src}")
+            logger.info(f"Destination: {target} ({'single file' if single_file_mode else f'directory, layout={args.layout}'})")
 
-        written, skipped = export_to_mbox(
-            src_path=src,
-            target_path=target,
-            single_file_mode=single_file_mode,
-            layout=args.layout,
-            start_year=args.start_year,
-            end_year=args.end_year,
-            since=args.since,
-            until=args.until,
-            include_folders=args.include_folders,
-            exclude_folders=args.exclude_folders,
-            state_file=args.state_file,
-            include_deleted=args.include_deleted,
-            max_mbox_gb=max_mbox_gb,
-            overwrite=(not args.append),
-            logger=logger,
-            dedup=args.dedup,
-            resume=args.resume,
-            parse_gmail=not args.no_gmail_labels,
-        )
-    finally:
-        logger.close()
+            written, skipped = export_to_mbox(
+                src_path=src,
+                target_path=target,
+                single_file_mode=single_file_mode,
+                layout=args.layout,
+                start_year=args.start_year,
+                end_year=args.end_year,
+                since=args.since,
+                until=args.until,
+                include_folders=args.include_folders,
+                exclude_folders=args.exclude_folders,
+                state_file=args.state_file,
+                include_deleted=args.include_deleted,
+                max_mbox_gb=max_mbox_gb,
+                overwrite=(not args.append),
+                logger=logger,
+                dedup=args.dedup,
+                resume=args.resume,
+                parse_gmail=not args.no_gmail_labels,
+                shutdown=shutdown,
+            )
+            if shutdown.is_interrupted:
+                sys.exit(130)
+        except KeyboardInterrupt:
+            shutdown.request_stop("KeyboardInterrupt (Ctrl+C)")
+            sys.exit(130)
+        finally:
+            logger.close()
 
 
 if __name__ == "__main__":

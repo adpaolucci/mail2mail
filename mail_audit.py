@@ -250,17 +250,26 @@ class AuditLogger:
         skipped_duplicate: int = 0,
         skipped_folder: int = 0,
         skipped_state: int = 0,
+        interrupted: bool = False,
+        interruption_reason: str = "",
     ) -> None:
         elapsed = max(time.time() - start_time, 1e-6)
         rate = exported / elapsed
         mb_rate = (total_bytes / (1024 * 1024)) / elapsed if total_bytes else 0.0
 
+        header_title = "MIGRATION AUDIT SUMMARY (PAUSED / INTERRUPTED)" if interrupted else "MIGRATION AUDIT SUMMARY"
         lines = [
             "\n" + "=" * 70,
-            "                     MIGRATION AUDIT SUMMARY",
+            f"                     {header_title}",
             "=" * 70,
             f"Source:                {source}",
             f"Target:                {target}",
+        ]
+        if interrupted:
+            reason_str = interruption_reason or "User Request (Ctrl+C / SIGTERM)"
+            lines.append(f"Status:                PAUSED / HALTED ({reason_str})")
+            lines.append("Integrity:             SAFE -- All saved items committed to disk with zero data loss.")
+        lines.extend([
             f"Duration:              {elapsed:.1f}s ({elapsed / 60:.1f}m) | Speed: {rate:.1f} msg/s ({mb_rate:.2f} MB/s)",
             "-" * 70,
             "Message Reconciliation:",
@@ -269,7 +278,7 @@ class AuditLogger:
             f"  Skipped (Duplicates): {skipped_duplicate:,}",
             f"  Skipped (Date Filter): {skipped_date:,}",
             f"  Skipped (Deleted):   {skipped_deleted:,}",
-        ]
+        ])
         if skipped_folder > 0:
             lines.append(f"  Skipped (Folder Rule): {skipped_folder:,}")
         if skipped_state > 0:

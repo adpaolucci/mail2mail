@@ -390,6 +390,22 @@ python mail2mail.py pst "D:\Migration\00_Source\LargeArchive" --out-dir "D:\Migr
 python mail2mail.py mbox "D:\Migration\02_Output_EML" "D:\Migration\03_Output_MBOX\MboxTree" --split-size 4G
 ```
 
+### 9) Graceful Interruption, Pause/Resume & Signal Handling (`Ctrl+C`, `SIGTERM`)
+`mail2mail` incorporates an interruption controller ([`mail_shutdown.py`](mail_shutdown.py)) ensuring zero data loss and clean state preservation when halting long-running migrations:
+- **Signal Trapping (`Ctrl+C` / `SIGINT`, `SIGTERM`, `SIGBREAK`)**:
+  - Instead of abruptly terminating mid-write, the controller allows the single in-flight email to finish saving cleanly.
+  - Commits all batched records to the `--state-file` cache and flushes `--audit-log` manifests.
+  - Gracefully unmounts all Outlook PST stores (`router.close_all()`) so Outlook flushes indices and releases file locks without leaving orphan handles or stuck 265 KB stores.
+  - Flushes all open MBOX file streams and EML directory handles.
+  - Prints the full reconciliation summary and displays a resumption banner showing the exact command needed to resume.
+  - Returns standard exit code `130`.
+- **Double-Tap Emergency Termination**:
+  - Pressing `Ctrl+C` a second time triggers an immediate emergency exit (`os._exit(130)`).
+- **Interactive Console Pause & Resume**:
+  - When running in an interactive terminal (TTY), press **`p`** or **`[Space]`** at any point to temporarily pause the conversion.
+  - Press **`[Space]`** or **`[Enter]`** to resume processing immediately.
+  - Press **`q`** or **`Ctrl+C`** to halt gracefully and commit all progress to disk.
+
 ---
 
 ## Testing & RFC Compliance Reference

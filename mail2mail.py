@@ -210,13 +210,16 @@ def main(argv: Optional[List[str]] = None) -> None:
         _print_top_help()
         return
 
-    if mode == "pst":
-        import mail2pst
-        mail2pst.main(forwarded, prog="mail2mail pst")
-    elif mode == "mbox":
-        mail2mbox.main(forwarded, prog="mail2mail mbox")
-    else:
-        mail2eml.main(forwarded, prog="mail2mail eml")
+    try:
+        if mode == "pst":
+            import mail2pst
+            mail2pst.main(forwarded, prog="mail2mail pst")
+        elif mode == "mbox":
+            mail2mbox.main(forwarded, prog="mail2mail mbox")
+        else:
+            mail2eml.main(forwarded, prog="mail2mail eml")
+    except KeyboardInterrupt:
+        sys.exit(130)
 
 
 if __name__ == "__main__":
