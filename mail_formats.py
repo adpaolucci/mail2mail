@@ -708,6 +708,8 @@ class _Ole2Reader:
 
         sector_shift = u16(30)
         mini_shift = u16(32)
+        if sector_shift not in (9, 12) or mini_shift != 6:
+            raise ValueError(f"Invalid OLE2 sector shift ({sector_shift}) or mini shift ({mini_shift})")
         self.sector_size = 1 << sector_shift
         self.mini_sector_size = 1 << mini_shift
         self.first_dir_sector = u32(48)
@@ -725,9 +727,12 @@ class _Ole2Reader:
 
         curr_difat = self.first_difat_sector
         entries_per_sector = (self.sector_size // 4) - 1
-        for _ in range(self.num_difat_sectors):
-            if curr_difat >= self.ENDOFCHAIN:
+        seen_difat: Set[int] = set()
+        max_difat_sectors = min(self.num_difat_sectors, max(1, len(data) // self.sector_size))
+        for _ in range(max_difat_sectors):
+            if curr_difat >= self.ENDOFCHAIN or curr_difat in seen_difat:
                 break
+            seen_difat.add(curr_difat)
             off = (curr_difat + 1) * self.sector_size
             if off + self.sector_size > len(data):
                 break
@@ -1861,6 +1866,19 @@ def iter_zip_or_olm_records(
             if ext_flags and ext_flags.get("is_deleted") and not include_deleted:
                 continue
 
+            if fname.lower().endswith((".mbox", ".mbx")):
+                try:
+                    with zf.open(member, "r") as fp:
+                        yield from iter_mbox_stream(
+                            fp,
+                            folder_parts,
+                            os.path.splitext(fname)[0],
+                            include_deleted=include_deleted,
+                        )
+                except Exception:
+                    pass
+                continue
+
             try:
                 data = zf.read(member)
             except Exception:
@@ -1905,6 +1923,21 @@ def iter_tar_records(
 
             folder_parts, ext_flags = _derive_archive_member_folder_parts(norm, base_parts)
             if ext_flags and ext_flags.get("is_deleted") and not include_deleted:
+                continue
+
+            if fname.lower().endswith((".mbox", ".mbx")):
+                fobj = tf.extractfile(member)
+                if fobj is not None:
+                    try:
+                        with fobj:
+                            yield from iter_mbox_stream(
+                                fobj,
+                                folder_parts,
+                                os.path.splitext(fname)[0],
+                                include_deleted=include_deleted,
+                            )
+                    except Exception:
+                        pass
                 continue
 
             fobj = tf.extractfile(member)

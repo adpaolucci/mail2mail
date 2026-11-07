@@ -214,16 +214,22 @@ def _decode_part_text(part) -> str:
 
 def _walk_outer_parts(msg):
     """
-    Walk MIME parts of `msg`, recursing into `multipart/*` containers but treating
-    encapsulated `message/rfc822` parts (RFC 2046 §5.2.1) as atomic leaf parts
-    so their inner bodies/attachments are not merged into the outer message.
+    Walk MIME parts of `msg`, traversing `multipart/*` containers iteratively (preventing
+    RecursionError on deeply nested MIME) but treating encapsulated `message/rfc822`
+    parts (RFC 2046 §5.2.1) as atomic leaf parts so their inner bodies/attachments
+    are not merged into the outer message.
     """
-    if msg.get_content_maintype() == "multipart":
-        for sub in msg.get_payload() or []:
-            if hasattr(sub, "get_content_maintype"):
-                yield from _walk_outer_parts(sub)
-    else:
-        yield msg
+    stack = [msg]
+    while stack:
+        part = stack.pop()
+        if part.get_content_maintype() == "multipart":
+            payload = part.get_payload()
+            if isinstance(payload, list):
+                for sub in reversed(payload):
+                    if hasattr(sub, "get_content_maintype"):
+                        stack.append(sub)
+        else:
+            yield part
 
 
 def pick_body(msg) -> Tuple[Optional[str], Optional[str], Set[int]]:
@@ -336,9 +342,11 @@ def add_attachments(mail, msg, tmpdir: str, body_parts: Optional[Set[int]] = Non
         slot_dir = os.path.abspath(os.path.join(tmpdir, f"s_{count}"))
         os.makedirs(slot_dir, exist_ok=True)
         # Keep total path length safely under Windows MAX_PATH (260 chars) for Outlook COM
-        max_fn_len = max(24, min(120, 230 - len(slot_dir)))
-        safe_fn = sanitize_name(fn, default=f"attachment_{count + 1}.bin", max_len=max_fn_len)
+        avail_len = max(8, 240 - len(slot_dir) - 1)
+        safe_fn = sanitize_name(fn, default=f"attachment_{count + 1}.bin", max_len=avail_len)
         p = os.path.realpath(os.path.join(slot_dir, safe_fn))
+        if len(p) >= 250:
+            p = os.path.realpath(os.path.join(slot_dir, f"a_{count}.bin"))
 
         try:
             with open(p, "wb") as f:
@@ -416,8 +424,9 @@ def populate_mailitem(mail_item, parsed, msg_bytes: bytes, temp_dir: str, flags=
     """
     pa = mail_item.PropertyAccessor
 
-    # 1. Basic OOM fields
-    mail_item.Subject = safe_get_header(parsed, "Subject", "")
+    # 1. Basic OOM fields (clamp Subject to Outlook COM's 250-char boundary)
+    raw_subj = safe_get_header(parsed, "Subject", "")
+    mail_item.Subject = raw_subj[:250] if len(raw_subj) > 250 else raw_subj
     to_str = format_address_list(safe_get_all_headers(parsed, "To"))
     if to_str:
         mail_item.To = to_str

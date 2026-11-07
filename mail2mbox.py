@@ -93,6 +93,11 @@ def build_mbox_from_line(msg, fallback_dt: Optional[datetime] = None) -> bytes:
     else:
         dt = dt.replace(tzinfo=timezone.utc)
 
+    if dt.year < 1900:
+        dt = dt.replace(year=1970)
+    elif dt.year > 2100:
+        dt = dt.replace(year=2100)
+
     asctime_str = time.asctime(dt.utctimetuple())
     line = f"From {sender} {asctime_str}\n"
     return line.encode("ascii", errors="replace")
@@ -167,11 +172,16 @@ def _split_mbox_ext(path: str) -> Tuple[str, str]:
 class MboxWriterPool:
     """
     Manages open `.mbox` output file handles and optional size-based rotation (`--max-mbox-gb`).
+    Maintains an LRU cache of at most `max_open` simultaneously open handles to prevent
+    file descriptor exhaustion (e.g. EMFILE / Too many open files) and excessive RAM
+    usage from concurrent compression buffers.
     """
-    def __init__(self, max_gb: float = 0.0, overwrite: bool = True):
+    def __init__(self, max_gb: float = 0.0, overwrite: bool = True, max_open: int = 64):
         self.max_bytes = int(max_gb * (1024**3)) if max_gb and max_gb > 0 else 0
         self.overwrite = overwrite
-        self._handles: Dict[str, Dict] = {}
+        self.max_open = max(4, max_open)
+        self._states: Dict[str, Dict] = {}
+        self._open_order: List[str] = []
 
     def _part_path(self, base_path: str, part: int) -> str:
         if part <= 1:
@@ -179,47 +189,81 @@ class MboxWriterPool:
         stem, ext = _split_mbox_ext(base_path)
         return f"{stem}__part{part}{ext}"
 
+    def _close_handle(self, norm_key: str) -> None:
+        state = self._states.get(norm_key)
+        if state and state.get("fh") is not None:
+            try:
+                state["fh"].close()
+            except Exception:
+                pass
+            state["fh"] = None
+        if norm_key in self._open_order:
+            self._open_order.remove(norm_key)
+
+    def _ensure_open_fh(self, norm_key: str, state: Dict, mode: str):
+        if state.get("fh") is not None:
+            if norm_key in self._open_order:
+                self._open_order.remove(norm_key)
+            self._open_order.append(norm_key)
+            return state["fh"]
+
+        while len(self._open_order) >= self.max_open:
+            oldest_key = self._open_order.pop(0)
+            oldest_state = self._states.get(oldest_key)
+            if oldest_state and oldest_state.get("fh") is not None:
+                try:
+                    oldest_state["fh"].close()
+                except Exception:
+                    pass
+                oldest_state["fh"] = None
+
+        fh = _open_mbox_stream(state["path"], mode=mode)
+        state["fh"] = fh
+        self._open_order.append(norm_key)
+        return fh
+
     def write_entry(self, target_path: str, entry_bytes: bytes) -> str:
         norm_key = os.path.normcase(os.path.abspath(target_path))
-        state = self._handles.get(norm_key)
+        state = self._states.get(norm_key)
         entry_len = len(entry_bytes)
 
         if state is None:
             part = 1
             actual_path = self._part_path(target_path, part)
             mode = "wb" if self.overwrite else "ab"
-            fh = _open_mbox_stream(actual_path, mode=mode)
             init_bytes = 0
             if not self.overwrite and os.path.isfile(win_long_path(actual_path)):
                 try:
                     init_bytes = os.path.getsize(win_long_path(actual_path))
                 except OSError:
                     init_bytes = 0
-            state = {"fh": fh, "path": actual_path, "bytes": init_bytes, "part": part, "base_path": target_path}
-            self._handles[norm_key] = state
+            state = {"fh": None, "path": actual_path, "bytes": init_bytes, "part": part, "base_path": target_path}
+            self._states[norm_key] = state
+            fh = self._ensure_open_fh(norm_key, state, mode=mode)
         elif self.max_bytes and state["bytes"] > 0 and (state["bytes"] + entry_len > self.max_bytes):
-            try:
-                state["fh"].close()
-            except Exception:
-                pass
+            self._close_handle(norm_key)
             state["part"] += 1
             actual_path = self._part_path(state["base_path"], state["part"])
-            fh = _open_mbox_stream(actual_path, mode="wb" if self.overwrite else "ab")
-            state.update({"fh": fh, "path": actual_path, "bytes": 0})
+            state.update({"path": actual_path, "bytes": 0})
+            fh = self._ensure_open_fh(norm_key, state, mode="wb" if self.overwrite else "ab")
+        else:
+            fh = self._ensure_open_fh(norm_key, state, mode="ab")
 
-        state["fh"].write(entry_bytes)
+        fh.write(entry_bytes)
         state["bytes"] += entry_len
         return state["path"]
 
     def close_all(self) -> List[str]:
         paths = []
-        for state in self._handles.values():
+        for state in self._states.values():
             paths.append(state["path"])
-            try:
-                state["fh"].close()
-            except Exception:
-                pass
-        self._handles.clear()
+            if state.get("fh") is not None:
+                try:
+                    state["fh"].close()
+                except Exception:
+                    pass
+                state["fh"] = None
+        self._open_order.clear()
         return paths
 
 

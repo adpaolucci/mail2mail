@@ -111,6 +111,16 @@ class TestMail2EmlAndMail2Mbox(unittest.TestCase):
         self.assertIn("2020.mbox", files)
         self.assertIn("2020__part2.mbox", files)
 
+    def test_mbox_writer_pool_lru_and_file_descriptor_limit(self):
+        pool = mail2mbox.MboxWriterPool(max_open=4)
+        for i in range(25):
+            p = os.path.join(self.tmpdir, f"box_{i}.mbox")
+            pool.write_entry(p, b"From - Mon Jan 01 00:00:00 2024\r\nSubject: LRU\r\n\r\nMsg\r\n\r\n")
+        self.assertLessEqual(len(pool._open_order), 4)
+        paths = pool.close_all()
+        self.assertEqual(len(paths), 25)
+        self.assertEqual(len(pool._open_order), 0)
+
 
 class TestMail2PstAndPstReader(unittest.TestCase):
     """Test mail2pst MAPI population, COM retry, MAX_PATH protection, and PST input reader."""
@@ -278,6 +288,19 @@ class TestMail2PstAndPstReader(unittest.TestCase):
 
         self.assertEqual(flaky_com_call(), "ok")
         self.assertEqual(attempts["count"], 3)
+
+    def test_walk_outer_parts_deep_mime_recursion_safety(self):
+        from email.message import EmailMessage
+        top = EmailMessage()
+        top.set_content("Top level")
+        curr = top
+        for i in range(1200):
+            nested = EmailMessage()
+            nested.set_content(f"Level {i}")
+            curr.add_attachment(nested)
+            curr = nested
+        parts = list(mail2pst._walk_outer_parts(top))
+        self.assertGreater(len(parts), 1)
 
 
 class TestMail2MailRouter(unittest.TestCase):
