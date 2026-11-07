@@ -9,10 +9,47 @@ description = "Universal Email & Mailbox Converter (MBOX, Thunderbird ImapMail/M
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
+authors = [
+    { name = "Andrew Paolucci", email = "andrew@paolucci.ca" },
+    { name = "Henrique Madson" },
+]
 dependencies = [
     "pywin32>=306; sys_platform == 'win32'",
 ]
-keywords = ["email", "mbox", "eml", "pst", "outlook", "thunderbird", "maildir", "emlx", "olm", "msg"]
+keywords = [
+    "email",
+    "mbox",
+    "mboxrd",
+    "eml",
+    "pst",
+    "outlook",
+    "thunderbird",
+    "maildir",
+    "emlx",
+    "olm",
+    "msg",
+    "mapi",
+    "rfc5322",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Email",
+    "Topic :: System :: Archiving",
+    "Topic :: Utilities",
+]
 
 [project.scripts]
 mail2mail = "mail2mail:main"
@@ -28,3 +65,6 @@ py-modules = [
     "mail2mbox",
     "mail2pst",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,18 @@
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.txt text eol=lf
+
+# Binary email/archive formats
+*.pst binary
+*.ost binary
+*.msg binary
+*.olm binary
+*.gz binary
+*.bz2 binary
+*.xz binary
+*.zip binary
+*.tgz binary

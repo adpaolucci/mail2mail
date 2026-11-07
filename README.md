@@ -1,5 +1,9 @@
 # `mail2mail` — Universal Email & Mailbox Converter (`mail2eml` / `mail2mbox` / `mail2pst`)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB.svg)](pyproject.toml)
+[![RFC Compliant](https://img.shields.io/badge/RFC-5322%20%7C%202045--2047%20%7C%203501%20%7C%204155-success.svg)](docs/rfc_compliance/README.md)
+
 Convert between **MBOX**, **Thunderbird `ImapMail` / `Mail`** (mbox and Maildir modes), **Maildir / Maildir++**, **Apple Mail (`.emlx` / `.mbox` bundles)**, **Outlook `.msg`**, **Outlook for Mac `.olm`**, **Outlook `.pst`**, **MH / Sylpheed / Claws Mail**, **MMDF**, **Emacs Babyl**, **`.eml` trees**, and **compressed archives (`.gz`, `.bz2`, `.xz`, `.zip`, `.tar.gz`, `.tgz`)** into `.eml` folder hierarchies (`mail2eml`), standard `mboxrd` `.mbox` / `.mbox.gz` files (`mail2mbox`), or Microsoft Outlook **.pst** archives (`mail2pst`) with full folder hierarchy preservation, message flag mapping, size/year splitting, and resilient Outlook MAPI integration.
 
 ---
@@ -8,17 +12,17 @@ Convert between **MBOX**, **Thunderbird `ImapMail` / `Mail`** (mbox and Maildir 
 
 | Command / Module | Purpose | Requires Outlook? |
 | :--- | :--- | :--- |
-| [`mail2mail.py`](file:///c:/Users/andre/Desktop/all2pst/mail2mail.py) (`mail2mail`) | Unified master CLI (`mail2mail eml ...`, `mail2mail mbox ...`, `mail2mail pst ...`, or auto-detected from destination extension) | Only for `.pst` input/output |
-| [`mail2eml.py`](file:///c:/Users/andre/Desktop/all2pst/mail2eml.py) (`mail2eml`) | Convert any supported mail format or archive into `.eml` files (`folder`, `year`, `month`, or `flat` layout) | No (unless reading `.pst`) |
-| [`mail2mbox.py`](file:///c:/Users/andre/Desktop/all2pst/mail2mbox.py) (`mail2mbox`) | Convert any supported mail format or archive into standard `mboxrd` `.mbox` (or `.mbox.gz` / `.mbox.bz2` / `.mbox.xz`) file(s) | No (unless reading `.pst`) |
-| [`mail2pst.py`](file:///c:/Users/andre/Desktop/all2pst/mail2pst.py) (`mail2pst`) | Convert/import any supported mail format or archive into one or more Outlook `.pst` files (single PST, year-split, `N`-way split, or auto-rotated at `--max-pst-gb`) | Yes (`pywin32`) |
-| [`mail_formats.py`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py) | Shared multi-format detection, streaming, flag normalization, and folder hierarchy engine | No (Stdlib only; `pywin32` for `.pst` input) |
+| [`mail2mail.py`](mail2mail.py) (`mail2mail`) | Unified master CLI (`mail2mail eml ...`, `mail2mail mbox ...`, `mail2mail pst ...`, or auto-detected from destination extension) | Only for `.pst` input/output |
+| [`mail2eml.py`](mail2eml.py) (`mail2eml`) | Convert any supported mail format or archive into `.eml` files (`folder`, `year`, `month`, or `flat` layout) | No (unless reading `.pst`) |
+| [`mail2mbox.py`](mail2mbox.py) (`mail2mbox`) | Convert any supported mail format or archive into standard `mboxrd` `.mbox` (or `.mbox.gz` / `.mbox.bz2` / `.mbox.xz`) file(s) | No (unless reading `.pst`) |
+| [`mail2pst.py`](mail2pst.py) (`mail2pst`) | Convert/import any supported mail format or archive into one or more Outlook `.pst` files (single PST, year-split, `N`-way split, or auto-rotated at `--max-pst-gb`) | Yes (`pywin32`) |
+| [`mail_formats.py`](mail_formats.py) | Shared multi-format detection, streaming, flag normalization, and folder hierarchy engine | No (Stdlib only; `pywin32` for `.pst` input) |
 
 ---
 
 ## Supported Email & Mailbox Formats
 
-All commands share [`mail_formats.py`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py) and automatically detect any of the following formats:
+All commands share [`mail_formats.py`](mail_formats.py) and automatically detect any of the following formats:
 
 | Format | Supported Inputs | Metadata & Status Flags Preserved |
 | :--- | :--- | :--- |
@@ -189,18 +193,18 @@ python mail2pst.py ^
 ## Testing & RFC Compliance Reference
 
 ### Running the Automated Test Suite
-The [`tests/`](file:///c:/Users/andre/Desktop/all2pst/tests/__init__.py) package verifies RFC compliance, all 10 mailbox formats, and all CLI exporters (`mail2eml`, `mail2mbox`, `mail2pst`, `mail2mail`):
+The [`tests/`](tests/) package verifies RFC compliance, all 10 mailbox formats, and all CLI exporters (`mail2eml`, `mail2mbox`, `mail2pst`, `mail2mail`):
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
 ### RFC & Format Specifications Reference (`docs/rfc_compliance/`)
-Detailed technical documentation mapping IETF RFCs and Microsoft Open Specifications to the codebase is located in [`docs/rfc_compliance/`](file:///c:/Users/andre/Desktop/all2pst/docs/rfc_compliance/README.md):
-- [`docs/rfc_compliance/README.md`](file:///c:/Users/andre/Desktop/all2pst/docs/rfc_compliance/README.md) — Master standards compliance matrix
-- [`docs/rfc_compliance/RFC5322_RFC2045_MIME_AND_HEADERS.md`](file:///c:/Users/andre/Desktop/all2pst/docs/rfc_compliance/RFC5322_RFC2045_MIME_AND_HEADERS.md) — RFC 5322, RFC 2045–2047, RFC 2183/2231/2392 (`cid:` MHTML), S/MIME & PGP/MIME
-- [`docs/rfc_compliance/RFC4155_MBOX_AND_MAILBOX_FORMATS.md`](file:///c:/Users/andre/Desktop/all2pst/docs/rfc_compliance/RFC4155_MBOX_AND_MAILBOX_FORMATS.md) — RFC 4155 (`mbox` / `mboxrd`), RFC 3501 §5.1.3 (IMAP Modified UTF-7), Thunderbird, Maildir++, Apple Mail `.emlx`, MH, MMDF, and Babyl
-- [`docs/rfc_compliance/MS_OXMSG_CFBF_MAPI_AND_OLM.md`](file:///c:/Users/andre/Desktop/all2pst/docs/rfc_compliance/MS_OXMSG_CFBF_MAPI_AND_OLM.md) — [MS-CFB] (OLE2), [MS-OXMSG] (`.msg`), [MS-OXPROPS] (MAPI DASL properties & `PT_SYSTIME`), and Outlook for Mac `.olm`
+Detailed technical documentation mapping IETF RFCs and Microsoft Open Specifications to the codebase is located in [`docs/rfc_compliance/`](docs/rfc_compliance/README.md):
+- [`docs/rfc_compliance/README.md`](docs/rfc_compliance/README.md) — Master standards compliance matrix
+- [`docs/rfc_compliance/RFC5322_RFC2045_MIME_AND_HEADERS.md`](docs/rfc_compliance/RFC5322_RFC2045_MIME_AND_HEADERS.md) — RFC 5322, RFC 2045–2047, RFC 2183/2231/2392 (`cid:` MHTML), S/MIME & PGP/MIME
+- [`docs/rfc_compliance/RFC4155_MBOX_AND_MAILBOX_FORMATS.md`](docs/rfc_compliance/RFC4155_MBOX_AND_MAILBOX_FORMATS.md) — RFC 4155 (`mbox` / `mboxrd`), RFC 3501 §5.1.3 (IMAP Modified UTF-7), Thunderbird, Maildir++, Apple Mail `.emlx`, MH, MMDF, and Babyl
+- [`docs/rfc_compliance/MS_OXMSG_CFBF_MAPI_AND_OLM.md`](docs/rfc_compliance/MS_OXMSG_CFBF_MAPI_AND_OLM.md) — [MS-CFB] (OLE2), [MS-OXMSG] (`.msg`), [MS-OXPROPS] (MAPI DASL properties & `PT_SYSTIME`), and Outlook for Mac `.olm`
 
 ---
 
@@ -210,3 +214,9 @@ Detailed technical documentation mapping IETF RFCs and Microsoft Open Specificat
   - Outlook holds an open write handle on mounted `.pst` files and flushes metadata on unmount. `mail2pst` automatically detaches all PST stores on completion (and during `--flush-every`), at which point Explorer shows the final size.
 - **Classic Outlook vs. "New Outlook"**
   - The web-based "New Outlook" for Windows does not support MAPI/COM automation (`Outlook.Application`). Switch to classic desktop Outlook before running `mail2pst` or reading `.pst` files.
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE).

@@ -206,5 +206,15 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Local reference notes
+# Local reference notes & private mailbox/archive files
 srcconvo.pdf
+*.pst
+*.ost
+*.olm
+*.msg
+*.mbox
+*.mbx
+*.eml
+*.emlx
+*.babyl
+*.mmdf

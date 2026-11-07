@@ -6,7 +6,7 @@ This document details how `mail2mail` implements Microsoft's Compound File Binar
 
 ## 1. [MS-CFB] — Compound File Binary File Format (OLE2)
 
-[`MiniOleReader`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py#L649-L837) in [`mail_formats.py`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py) is a zero-dependency, pure-Python parser for Microsoft Compound File Binary (`.msg`) files:
+[`MiniOleReader`](../../mail_formats.py#L649-L837) in [`mail_formats.py`](../../mail_formats.py) is a zero-dependency, pure-Python parser for Microsoft Compound File Binary (`.msg`) files:
 
 | [MS-CFB] Section | Structure | Implementation Details |
 | :--- | :--- | :--- |
@@ -19,7 +19,7 @@ This document details how `mail2mail` implements Microsoft's Compound File Binar
 
 ## 2. [MS-OXMSG] — Outlook Item (`.msg`) File Format
 
-[`parse_msg_bytes`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py#L878-L1046) reconstructs a full RFC 5322 `EmailMessage` (with HTML/plain body, recipients, attachments, inline CIDs, and status flags) from an OLE2 `.msg` structure:
+[`parse_msg_bytes`](../../mail_formats.py#L878-L1046) reconstructs a full RFC 5322 `EmailMessage` (with HTML/plain body, recipients, attachments, inline CIDs, and status flags) from an OLE2 `.msg` structure:
 
 ### 2.1 Variable-Length Property Streams (`__substg1.0_XXXXYYYY`)
 - **`XXXX`** = 16-bit MAPI Property ID in uppercase hex; **`YYYY`** = 16-bit Property Type:
@@ -37,7 +37,7 @@ This document details how `mail2mail` implements Microsoft's Compound File Binar
   - `0x0E070003` (`PidTagMessageFlags`): `0x01` = `MSGFLAG_READ`
   - `0x10900003` (`PidTagFlagStatus`): `2` = `olFlagMarked`
   - `0x10810003` (`PidTagLastVerbExecuted`): `102`/`103` = Replied/Reply-All, `104` = Forwarded
-  - `0x00390040` (`PidTagClientSubmitTime`) / `0x0E060040` (`PidTagMessageDeliveryTime`): 64-bit Windows `FILETIME` (100-nanosecond intervals since `1601-01-01 00:00:00 UTC`), converted to RFC 5322 `Date` via [`_filetime_to_datetime`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py#L840-L848).
+  - `0x00390040` (`PidTagClientSubmitTime`) / `0x0E060040` (`PidTagMessageDeliveryTime`): 64-bit Windows `FILETIME` (100-nanosecond intervals since `1601-01-01 00:00:00 UTC`), converted to RFC 5322 `Date` via [`_filetime_to_datetime`](../../mail_formats.py#L840-L848).
 
 ### 2.3 Recipient & Attachment Sub-Storages
 - **`__recip_version1.0_#XXXXXXXX`**: Reads `PidTagRecipientType` (`0x0C150003`: `1` = `MAPI_TO`, `2` = `MAPI_CC`, `3` = `MAPI_BCC`), `PidTagDisplayName` (`3001`), and `PidTagSmtpAddress` (`39FE`) / `PidTagEmailAddress` (`3003`).
@@ -47,7 +47,7 @@ This document details how `mail2mail` implements Microsoft's Compound File Binar
 
 ## 3. [MS-OXPROPS] & MAPI DASL Properties in `mail2pst.py`
 
-When importing into an Outlook `.pst` store via `PropertyAccessor.SetProperty`, [`mail2pst.py`](file:///c:/Users/andre/Desktop/all2pst/mail2pst.py) sets the following DASL properties (`http://schemas.microsoft.com/mapi/proptag/0x...`):
+When importing into an Outlook `.pst` store via `PropertyAccessor.SetProperty`, [`mail2pst.py`](../../mail2pst.py) sets the following DASL properties (`http://schemas.microsoft.com/mapi/proptag/0x...`):
 
 | Constant in `mail2pst.py` | DASL Property Tag | MAPI Canonical Name | Purpose |
 | :--- | :--- | :--- | :--- |
@@ -71,4 +71,4 @@ When importing into an Outlook `.pst` store via `PropertyAccessor.SetProperty`, 
 ## 4. Outlook for Mac `.olm` Archive Format
 
 An `.olm` file is a ZIP archive produced by Outlook for Mac containing XML message descriptors under `Accounts/<account>/com.microsoft.__Messages/<Folder>/<Subfolder>/message_XXXXX.xml` and binary attachments under `Attachments/`:
-- [`iter_olm_records`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py#L1078-L1241) parses `OPFMessageCopySubject`, `OPFMessageCopySentTime` / `OPFMessageCopyReceivedTime` (ISO-8601), `OPFMessageCopyMessageID`, `OPFMessageGetIsRead`, `OPFMessageCopyFlagStatus`, `OPFMessageCopyFromAddresses`, `OPFMessageCopyToAddresses`, `OPFMessageCopyCCAddresses`, `OPFMessageCopyBCCAddresses`, `OPFMessageCopyBody`, `OPFMessageCopyHTMLBody`, and `OPFMessageCopyAttachmentList` (`OPFAttachmentURL`, `OPFAttachmentName`, `OPFAttachmentContentType`, `OPFAttachmentContentID`).
+- [`iter_olm_records`](../../mail_formats.py#L1078-L1241) parses `OPFMessageCopySubject`, `OPFMessageCopySentTime` / `OPFMessageCopyReceivedTime` (ISO-8601), `OPFMessageCopyMessageID`, `OPFMessageGetIsRead`, `OPFMessageCopyFlagStatus`, `OPFMessageCopyFromAddresses`, `OPFMessageCopyToAddresses`, `OPFMessageCopyCCAddresses`, `OPFMessageCopyBCCAddresses`, `OPFMessageCopyBody`, `OPFMessageCopyHTMLBody`, and `OPFMessageCopyAttachmentList` (`OPFAttachmentURL`, `OPFAttachmentName`, `OPFAttachmentContentType`, `OPFAttachmentContentID`).

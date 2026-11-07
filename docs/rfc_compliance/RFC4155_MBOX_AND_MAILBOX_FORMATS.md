@@ -12,17 +12,17 @@ This document specifies how `mail2mail` reads and writes `mbox`/`mboxrd` streams
   From <sender-addr> <24-char-UTC-asctime>\n
   ```
   Example: `From alice@example.com Fri Nov  6 20:30:00 2020\n`
-- **Reader ([`is_mbox_from_line`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py#L1528-L1534) & [`MBOX_FROM_RE`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py#L88-L94))**:
+- **Reader ([`is_mbox_from_line`](../../mail_formats.py#L1528-L1534) & [`MBOX_FROM_RE`](../../mail_formats.py#L88-L94))**:
   - Matches canonical RFC 4155 24-character `asctime` lines (`From <addr> <Day> <Mon> <dd> <hh:mm:ss> [TZ] <yyyy>`) as well as Thunderbird's `From - <Day> <Mon> ...` placeholder sender format.
   - Handles back-to-back messages (including header-only messages with no body) without requiring a preceding blank line when a valid `From ` envelope line is encountered.
-- **Writer ([`build_mbox_from_line`](file:///c:/Users/andre/Desktop/all2pst/mail2mbox.py#L64-L94))**:
+- **Writer ([`build_mbox_from_line`](../../mail2mbox.py#L64-L94))**:
   - Extracts the sender address from `Return-Path` or `From` (defaulting to `MAILER-DAEMON` if absent or whitespace-bearing) and formats the `Date` header in UTC using `time.asctime(dt.utctimetuple())`.
 
 ### 1.2 `mboxrd` Reversible `>From ` Escaping
 - **Why `mboxrd` over `mboxo`**: In legacy `mboxo`, only bare `From ` lines in the body are prefixed with `>`, which cannot be unambiguously reversed if a line originally began with `>From `. In **`mboxrd`** (used by Thunderbird, qmail, and modern Unix tools), *any* body line matching `^>*From ` has one `>` prepended on write (`From ` $\to$ `>From `, `>From ` $\to$ `>>From `) and one `>` stripped on read.
-- **Writer ([`format_mboxrd_entry`](file:///c:/Users/andre/Desktop/all2pst/mail2mbox.py#L97-L135))**:
+- **Writer ([`format_mboxrd_entry`](../../mail2mbox.py#L97-L135))**:
   - Applies `re.sub(rb"^(>*From )", rb">\1", body_block, flags=re.MULTILINE)` exclusively to the message body (after the `\n\n` header separator) and appends a trailing blank line.
-- **Reader ([`iter_mbox_stream`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py#L1561-L1620))**:
+- **Reader ([`iter_mbox_stream`](../../mail_formats.py#L1561-L1620))**:
   - While in the body state (`in_headers == False`), any non-boundary line where `line.startswith(b">")` and `line.lstrip(b">").startswith(b"From ")` has its leading `>` stripped (`line = line[1:]`), restoring exact byte-for-byte body fidelity across round-trips.
 
 ---
@@ -38,7 +38,7 @@ This document specifies how `mail2mail` reads and writes `mbox`/`mboxrd` streams
   - `Café` $\leftrightarrow$ `Caf&AOk-`
   - `日本語/台北` $\leftrightarrow$ `&ZeVnLIqe-/&U,BTFw-`
 - **Implementation**:
-  - [`decode_imap_utf7`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py#L130-L160) & [`encode_imap_utf7`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py#L163-L193) in [`mail_formats.py`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py).
+  - [`decode_imap_utf7`](../../mail_formats.py#L130-L160) & [`encode_imap_utf7`](../../mail_formats.py#L163-L193) in [`mail_formats.py`](../../mail_formats.py).
 
 ---
 
@@ -58,15 +58,15 @@ This document specifies how `mail2mail` reads and writes `mbox`/`mboxrd` streams
 
 ## 4. Maildir, Apple Mail `.emlx`, MH, MMDF, and Babyl Specifications
 
-- **Maildir & Maildir++ ([`parse_maildir_flags`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py#L469-L511), [`normalize_maildir_folder_parts`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py#L514-L539))**:
+- **Maildir & Maildir++ ([`parse_maildir_flags`](../../mail_formats.py#L469-L511), [`normalize_maildir_folder_parts`](../../mail_formats.py#L514-L539))**:
   - Supports both POSIX `:2,<flags>` and Windows-compatible `;2,<flags>` (used by Thunderbird Maildir on Windows and offlineimap/mbsync).
   - Ignores `tmp/` directories and converts Maildir++ dot-prefixed folders (`.Work.Projects.2024`) into nested folder paths (`Work/Projects/2024`).
-- **Apple Mail `.emlx` & `*.mbox` Bundles ([`parse_emlx_bytes`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py#L569-L619))**:
+- **Apple Mail `.emlx` & `*.mbox` Bundles ([`parse_emlx_bytes`](../../mail_formats.py#L569-L619))**:
   - Reads the ASCII decimal byte-count line at the start of `.emlx` / `.partial.emlx` files, slices the exact RFC 5322 byte range, and parses the trailing XML `<plist>` `<key>flags</key><integer>...</integer>` bitmask.
   - Collapses internal `*.mbox/<UUID>/Data/0..9/Messages` shard directories into clean user-facing folder paths.
-- **RAND MH ([`parse_mh_sequences`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py#L1470-L1496))**:
+- **RAND MH ([`parse_mh_sequences`](../../mail_formats.py#L1470-L1496))**:
   - Parses `.mh_sequences` sequence ranges (`unseen: 1-5 8`, `flagged`, `replied`, `forwarded`, `deleted`) and maps numbered message files (`1`, `2`, …).
-- **MMDF ([`iter_mmdf_stream`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py#L1622-L1653))**:
+- **MMDF ([`iter_mmdf_stream`](../../mail_formats.py#L1622-L1653))**:
   - Splits messages delimited by 4-SOH lines (`\x01\x01\x01\x01\n`).
-- **Emacs Rmail Babyl ([`iter_babyl_stream`](file:///c:/Users/andre/Desktop/all2pst/mail_formats.py#L1655-L1702))**:
+- **Emacs Rmail Babyl ([`iter_babyl_stream`](../../mail_formats.py#L1655-L1702))**:
   - Splits `\x1f`-delimited Babyl records, parses the attribute line (`1, unseen, answered, flagged, forwarded, deleted,,`), and extracts the full header block around `*** EOOH ***`.
