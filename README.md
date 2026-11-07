@@ -206,6 +206,9 @@ python mail2pst.py ^
 - `--audit-log FILE`: Generate structured audit manifest (`.csv` or `.jsonl`) with message metadata and SHA-256 hashes.
 - `--error-log FILE`: Record machine-readable failure/warning entries (`.jsonl`).
 - `--log-file FILE`: Mirror all operations with timestamps into a persistent log file.
+- `--dedup [MODE]`: Deduplicate messages during migration (`auto`, `message-id`, or `sha256`; default: `none`).
+- `--resume [FILE]`: Resume an interrupted migration, skipping messages already recorded with `status=SUCCESS` in an existing audit manifest.
+- `--no-gmail-labels`: Disable automatic Google Takeout `X-Gmail-Labels` folder hierarchy extraction.
 - `--dry-run`: Pre-flight inspection reporting folder counts, date ranges, and oversized attachments without writing to disk/PST.
 - `-v` / `--verbose` & `-q` / `--quiet`: Control console output verbosity.
 
@@ -236,6 +239,18 @@ python mail2mail.py pst "D:\Mail\ImapMail" "D:\PSTs\Mail.pst" --audit-log "D:\PS
 
 ### 3) Dedicated Failure Log (`--error-log <failures.jsonl>`)
 Appends machine-readable JSON entries with exact message subjects, Message-IDs, error types, and exception details for any skipped or failed messages, eliminating manual log hunting.
+
+### 4) In-Flight Deduplication (`--dedup {auto | message-id | sha256}`)
+Prevents importing duplicate messages when scanning multi-part archives (e.g. split Takeout `.zip` files) or merging multiple backup roots. Duplicates are tracked and logged in the manifest as `SKIPPED_DUPLICATE`:
+```cmd
+python mail2mail.py pst "D:\Takeout_Parts" "D:\PSTs\Unified.pst" --dedup auto
+```
+
+### 5) Resuming Interrupted Migrations (`--resume [manifest]`)
+Large migrations (hundreds of gigabytes) can be resumed after system reboots or power interruptions without duplicating already-imported records. `--resume` reads existing `SUCCESS` entries from the audit manifest and skips them on the next run:
+```cmd
+python mail2mail.py pst "D:\LargeMailbox" "D:\PSTs\Mailbox.pst" --audit-log "D:\PSTs\audit.csv" --resume
+```
 
 ---
 

@@ -283,20 +283,139 @@ def safe_get_all_headers(msg, name: str) -> List[str]:
     return out
 
 
-def pick_year_month(msg) -> Tuple[int, int]:
-    """Extract (year, month) from the Date header; default to (1970, 1) if missing/invalid."""
-    year = 1970
-    month = 1
+def extract_best_datetime(msg) -> Optional[datetime]:
+    """
+    Extract the best RFC 5322 datetime from an email.message.Message:
+      1. 'Date' header
+      2. 'Resent-Date' header
+      3. Date substring after ';' in 'Received' headers (checking newest hops first)
+    Returns timezone-aware or naive datetime, or None if completely unparseable.
+    """
+    if msg is None:
+        return None
+
+    # 1. Direct Date header
     try:
         d = safe_get_header(msg, "Date", "").strip()
         if d:
             dt = parsedate_to_datetime(d)
             if dt is not None and 1900 <= dt.year <= 2100:
-                year = dt.year
-                month = dt.month
+                return dt
     except Exception:
         pass
-    return year, month
+
+    # 2. Resent-Date header
+    try:
+        rd = safe_get_header(msg, "Resent-Date", "").strip()
+        if rd:
+            dt = parsedate_to_datetime(rd)
+            if dt is not None and 1900 <= dt.year <= 2100:
+                return dt
+    except Exception:
+        pass
+
+    # 3. Received headers
+    try:
+        for rcv in safe_get_all_headers(msg, "Received"):
+            if ";" in rcv:
+                date_part = rcv.rsplit(";", 1)[1].strip()
+                try:
+                    dt = parsedate_to_datetime(date_part)
+                    if dt is not None and 1900 <= dt.year <= 2100:
+                        return dt
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return None
+
+
+def pick_year_month(msg) -> Tuple[int, int]:
+    """Extract (year, month) from Date or Received header; default to (1970, 1) if missing/invalid."""
+    try:
+        dt = extract_best_datetime(msg)
+        if dt is not None and 1900 <= dt.year <= 2100:
+            return dt.year, dt.month
+    except Exception:
+        pass
+    return 1970, 1
+
+
+GMAIL_SYSTEM_TAGS = {
+    "starred",
+    "important",
+    "unread",
+    "chat",
+    "archived",
+    "opened",
+    "draft",
+    "drafts",
+    "muted",
+    "snoozed",
+}
+
+
+def parse_gmail_labels(header_val: str) -> Tuple[List[str], Dict[str, bool]]:
+    """
+    Parse an X-Gmail-Labels header (e.g. from Google Takeout) into:
+      - folder_parts: List[str] representing the primary user folder hierarchy
+      - flags: Dict[str, bool] containing read/flagged/deleted status
+
+    Example:
+      'Inbox,Important,Work/Project Alpha,Starred' -> (['Work', 'Project Alpha'], {'is_flagged': True, 'is_read': True, ...})
+      'Sent,Important' -> (['Sent Items'], ...)
+      'Trash' -> (['Deleted Items'], {'is_deleted': True, ...})
+    """
+    if not header_val:
+        return ["Inbox"], default_flags()
+
+    raw_labels = [p.strip().strip('"') for p in re.findall(r'(?:[^,"]|"(?:\\.|[^"])*")+', header_val)]
+    raw_labels = [l for l in raw_labels if l]
+
+    is_flagged = any(l.lower() == "starred" for l in raw_labels)
+    is_read = not any(l.lower() == "unread" for l in raw_labels)
+    is_deleted = any(l.lower() in ("trash", "bin") for l in raw_labels)
+    is_spam = any(l.lower() in ("spam", "junk") for l in raw_labels)
+    is_sent = any(l.lower() == "sent" for l in raw_labels)
+    is_inbox = any(l.lower() == "inbox" for l in raw_labels)
+    is_draft = any(l.lower() in ("draft", "drafts") for l in raw_labels)
+
+    flags = default_flags(
+        is_read=is_read,
+        is_flagged=is_flagged,
+        is_deleted=is_deleted,
+    )
+
+    user_labels: List[str] = []
+    for l in raw_labels:
+        low = l.lower()
+        if low in GMAIL_SYSTEM_TAGS:
+            continue
+        if low.startswith("category ") or low.startswith("^"):
+            continue
+        if low in ("inbox", "sent", "trash", "bin", "spam", "junk", "draft", "drafts"):
+            continue
+        user_labels.append(l)
+
+    if user_labels:
+        best_label = max(user_labels, key=lambda s: s.count("/"))
+        parts = [clean_folder_segment(p) for p in best_label.split("/") if p.strip()]
+        if parts:
+            return parts, flags
+
+    if is_inbox:
+        return ["Inbox"], flags
+    if is_sent:
+        return ["Sent Items"], flags
+    if is_draft:
+        return ["Drafts"], flags
+    if is_deleted:
+        return ["Deleted Items"], flags
+    if is_spam:
+        return ["Junk Email"], flags
+
+    return ["Inbox"], flags
 
 
 # ----------------------- Data Model & Status Flags -----------------------
@@ -1544,19 +1663,38 @@ def _finalize_stream_message(
     folder_parts: List[str],
     source_name: str,
     ext_flags: Optional[Dict[str, bool]] = None,
+    parse_gmail: bool = True,
 ) -> MailRecord:
     while lines and lines[-1] in (b"\n", b"\r\n"):
         lines.pop()
     raw = b"".join(lines)
     hdr_flags, has_hdr = extract_flags_from_headers(raw)
     if ext_flags is not None and not has_hdr:
-        flags = ext_flags
+        flags = dict(ext_flags)
         raw = inject_mozilla_status_bytes(raw, flags)
     else:
-        flags = hdr_flags
+        flags = dict(hdr_flags)
+
+    final_parts = list(folder_parts)
+    if parse_gmail and (b"X-Gmail-Labels:" in raw[:32768] or b"x-gmail-labels:" in raw[:32768].lower()):
+        m = re.search(rb"(?im)^X-Gmail-Labels\s*:\s*([^\r\n]+)", raw[:32768])
+        if m:
+            label_val = m.group(1).decode("utf-8", errors="replace").strip()
+            gm_parts, gm_flags = parse_gmail_labels(label_val)
+            if gm_parts:
+                is_generic = (
+                    not final_parts
+                    or any("all mail" in p.lower() or "takeout" in p.lower() for p in final_parts)
+                    or final_parts == ["Inbox"]
+                )
+                final_parts = gm_parts if is_generic else final_parts + gm_parts
+            flags["is_flagged"] = flags.get("is_flagged", False) or gm_flags["is_flagged"]
+            flags["is_read"] = flags.get("is_read", True) and gm_flags["is_read"]
+            flags["is_deleted"] = flags.get("is_deleted", False) or gm_flags["is_deleted"]
+
     return MailRecord(
         raw_bytes=raw,
-        folder_parts=list(folder_parts),
+        folder_parts=final_parts,
         source_name=source_name,
         is_deleted=flags.get("is_deleted", False),
         flags=flags,
@@ -1568,6 +1706,7 @@ def iter_mbox_stream(
     folder_parts: List[str],
     source_prefix: str = "msg",
     include_deleted: bool = False,
+    parse_gmail: bool = True,
 ) -> Iterator[MailRecord]:
     """
     Stream messages from an mbox / mboxrd file-like object with O(1) memory per message.
@@ -1593,7 +1732,7 @@ def iter_mbox_stream(
                 if is_mbox_from_line(line):
                     if msg_lines:
                         idx += 1
-                        rec = _finalize_stream_message(msg_lines, folder_parts, f"{source_prefix}_{idx:06d}.eml")
+                        rec = _finalize_stream_message(msg_lines, folder_parts, f"{source_prefix}_{idx:06d}.eml", parse_gmail=parse_gmail)
                         if include_deleted or not rec.is_deleted:
                             yield rec
                     in_headers = True
@@ -1606,7 +1745,7 @@ def iter_mbox_stream(
                 if is_mbox_from_line(line):
                     if msg_lines:
                         idx += 1
-                        rec = _finalize_stream_message(msg_lines, folder_parts, f"{source_prefix}_{idx:06d}.eml")
+                        rec = _finalize_stream_message(msg_lines, folder_parts, f"{source_prefix}_{idx:06d}.eml", parse_gmail=parse_gmail)
                         if include_deleted or not rec.is_deleted:
                             yield rec
                     in_headers = True
@@ -1619,7 +1758,7 @@ def iter_mbox_stream(
 
     if in_msg and msg_lines:
         idx += 1
-        rec = _finalize_stream_message(msg_lines, folder_parts, f"{source_prefix}_{idx:06d}.eml")
+        rec = _finalize_stream_message(msg_lines, folder_parts, f"{source_prefix}_{idx:06d}.eml", parse_gmail=parse_gmail)
         if include_deleted or not rec.is_deleted:
             yield rec
 
@@ -1746,6 +1885,7 @@ def _iter_records_from_bytes(
     include_deleted: bool = False,
     ext_flags: Optional[Dict[str, bool]] = None,
     native_msg_path: Optional[str] = None,
+    parse_gmail: bool = True,
 ) -> Iterator[MailRecord]:
     low = filename.lower()
     fmt = _sniff_stream_format(data[:4096])
@@ -1787,19 +1927,37 @@ def _iter_records_from_bytes(
         return
 
     if low.endswith(".mbox") or fmt == "mbox":
-        yield from iter_mbox_stream(io.BytesIO(data), folder_parts, os.path.splitext(filename)[0], include_deleted)
+        yield from iter_mbox_stream(io.BytesIO(data), folder_parts, os.path.splitext(filename)[0], include_deleted, parse_gmail=parse_gmail)
         return
 
     hdr_flags, has_hdr = extract_flags_from_headers(data)
     if ext_flags is not None and not has_hdr:
-        flags = ext_flags
+        flags = dict(ext_flags)
         data = inject_mozilla_status_bytes(data, flags)
     else:
-        flags = hdr_flags
+        flags = dict(hdr_flags)
+
+    final_parts = list(folder_parts)
+    if parse_gmail and (b"X-Gmail-Labels:" in data[:32768] or b"x-gmail-labels:" in data[:32768].lower()):
+        m = re.search(rb"(?im)^X-Gmail-Labels\s*:\s*([^\r\n]+)", data[:32768])
+        if m:
+            label_val = m.group(1).decode("utf-8", errors="replace").strip()
+            gm_parts, gm_flags = parse_gmail_labels(label_val)
+            if gm_parts:
+                is_generic = (
+                    not final_parts
+                    or any("all mail" in p.lower() or "takeout" in p.lower() for p in final_parts)
+                    or final_parts == ["Inbox"]
+                )
+                final_parts = gm_parts if is_generic else final_parts + gm_parts
+            flags["is_flagged"] = flags.get("is_flagged", False) or gm_flags["is_flagged"]
+            flags["is_read"] = flags.get("is_read", True) and gm_flags["is_read"]
+            flags["is_deleted"] = flags.get("is_deleted", False) or gm_flags["is_deleted"]
+
     if include_deleted or not flags.get("is_deleted", False):
         yield MailRecord(
             raw_bytes=data,
-            folder_parts=list(folder_parts),
+            folder_parts=final_parts,
             source_name=filename,
             is_deleted=flags.get("is_deleted", False),
             flags=flags,
@@ -1839,6 +1997,7 @@ def iter_zip_or_olm_records(
     zip_path_or_fileobj,
     base_folder_parts: Optional[List[str]] = None,
     include_deleted: bool = False,
+    parse_gmail: bool = True,
 ) -> Iterator[MailRecord]:
     """Iterate records from a .zip or .olm archive."""
     base_parts = list(base_folder_parts) if base_folder_parts else []
@@ -1874,6 +2033,7 @@ def iter_zip_or_olm_records(
                             folder_parts,
                             os.path.splitext(fname)[0],
                             include_deleted=include_deleted,
+                            parse_gmail=parse_gmail,
                         )
                 except Exception:
                     pass
@@ -1892,6 +2052,7 @@ def iter_zip_or_olm_records(
                 fname,
                 include_deleted=include_deleted,
                 ext_flags=ext_flags,
+                parse_gmail=parse_gmail,
             )
 
 
@@ -1962,6 +2123,7 @@ def iter_file_records(
     folder_parts: Optional[List[str]] = None,
     include_deleted: bool = False,
     ext_flags: Optional[Dict[str, bool]] = None,
+    parse_gmail: bool = True,
 ) -> Iterator[MailRecord]:
     """
     Yield MailRecords from a single file on disk (supports .mbox, extensionless mbox,
@@ -1990,7 +2152,7 @@ def iter_file_records(
         return
 
     if low.endswith((".zip", ".olm")):
-        yield from iter_zip_or_olm_records(lp, folder_parts or [], include_deleted=include_deleted)
+        yield from iter_zip_or_olm_records(lp, folder_parts or [], include_deleted=include_deleted, parse_gmail=parse_gmail)
         return
 
     if low.endswith((".gz", ".bz2", ".xz")):
@@ -2004,7 +2166,7 @@ def iter_file_records(
             if inner_low.endswith(".mbox") or fmt == "mbox":
                 f_parts = list(folder_parts) if folder_parts is not None else [clean_folder_segment(os.path.splitext(inner_name)[0] or "Inbox")]
                 with open_fn(lp, "rb") as zfp:
-                    yield from iter_mbox_stream(zfp, f_parts, os.path.splitext(inner_name)[0], include_deleted)
+                    yield from iter_mbox_stream(zfp, f_parts, os.path.splitext(inner_name)[0], include_deleted, parse_gmail=parse_gmail)
                 return
             if fmt == "mmdf":
                 with open_fn(lp, "rb") as zfp:
@@ -2018,6 +2180,7 @@ def iter_file_records(
                 inner_name,
                 include_deleted=include_deleted,
                 ext_flags=ext_flags,
+                parse_gmail=parse_gmail,
             )
         except Exception:
             pass
@@ -2036,7 +2199,7 @@ def iter_file_records(
         return
 
     if fmt == "zip":
-        yield from iter_zip_or_olm_records(lp, folder_parts or [], include_deleted=include_deleted)
+        yield from iter_zip_or_olm_records(lp, folder_parts or [], include_deleted=include_deleted, parse_gmail=parse_gmail)
         return
 
     if low.endswith(".msg") or fmt == "msg":
@@ -2050,6 +2213,7 @@ def iter_file_records(
                 include_deleted=include_deleted,
                 ext_flags=ext_flags,
                 native_msg_path=os.path.abspath(file_path),
+                parse_gmail=parse_gmail,
             )
         except OSError:
             pass
@@ -2065,6 +2229,7 @@ def iter_file_records(
                 fname,
                 include_deleted=include_deleted,
                 ext_flags=ext_flags,
+                parse_gmail=parse_gmail,
             )
         except OSError:
             pass
@@ -2084,7 +2249,7 @@ def iter_file_records(
     if not is_single_msg_ext and (low.endswith(".mbox") or fmt == "mbox" or "." not in fname):
         mbox_folder = list(folder_parts) if folder_parts is not None else [clean_folder_segment(fname)]
         with open(lp, "rb") as fp:
-            yield from iter_mbox_stream(fp, mbox_folder, clean_folder_segment(fname), include_deleted)
+            yield from iter_mbox_stream(fp, mbox_folder, clean_folder_segment(fname), include_deleted, parse_gmail=parse_gmail)
         return
 
     if fmt in ("eml", "mbox") or low.endswith(".eml"):
@@ -2097,6 +2262,7 @@ def iter_file_records(
                 fname,
                 include_deleted=include_deleted,
                 ext_flags=ext_flags,
+                parse_gmail=parse_gmail,
             )
         except OSError:
             pass
@@ -2105,13 +2271,14 @@ def iter_file_records(
 def iter_mail_records(
     src_path: str,
     include_deleted: bool = False,
+    parse_gmail: bool = True,
 ) -> Iterator[MailRecord]:
     """
     Universal generator yielding MailRecords from any supported file or directory hierarchy.
     """
     abs_src = os.path.abspath(src_path)
     if os.path.isfile(win_long_path(abs_src)):
-        yield from iter_file_records(abs_src, folder_parts=None, include_deleted=include_deleted)
+        yield from iter_file_records(abs_src, folder_parts=None, include_deleted=include_deleted, parse_gmail=parse_gmail)
         return
 
     for root, dirs, files in os.walk(win_long_path(abs_src)):
@@ -2140,6 +2307,7 @@ def iter_mail_records(
                     folder_parts=folder_parts,
                     include_deleted=include_deleted,
                     ext_flags=md_flags,
+                    parse_gmail=parse_gmail,
                 )
             continue
 
@@ -2160,6 +2328,7 @@ def iter_mail_records(
                     fpath,
                     folder_parts=folder_parts,
                     include_deleted=include_deleted,
+                    parse_gmail=parse_gmail,
                 )
                 continue
 
@@ -2173,6 +2342,7 @@ def iter_mail_records(
                     folder_parts=folder_parts,
                     include_deleted=include_deleted,
                     ext_flags=(mh_flags if has_mh else None),
+                    parse_gmail=parse_gmail,
                 )
                 continue
 
@@ -2186,6 +2356,7 @@ def iter_mail_records(
                     fpath,
                     folder_parts=folder_parts,
                     include_deleted=include_deleted,
+                    parse_gmail=parse_gmail,
                 )
                 continue
 
@@ -2194,4 +2365,5 @@ def iter_mail_records(
                 fpath,
                 folder_parts=folder_parts,
                 include_deleted=include_deleted,
+                parse_gmail=parse_gmail,
             )

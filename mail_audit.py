@@ -38,7 +38,7 @@ from mail_formats import (
 @dataclass
 class AuditRecord:
     timestamp: str
-    status: str  # SUCCESS, SKIPPED_DATE, SKIPPED_DELETED, SKIPPED_OVERSIZED, FAILED
+    status: str  # SUCCESS, SKIPPED_DATE, SKIPPED_DELETED, SKIPPED_OVERSIZED, SKIPPED_DUPLICATE, FAILED
     source_file: str
     source_folder: str
     target_location: str
@@ -189,6 +189,51 @@ class AuditLogger:
             except Exception:
                 pass
 
+    @staticmethod
+    def load_completed_keys(manifest_path: str) -> Set[str]:
+        """
+        Read an existing CSV or JSONL audit manifest and return a set of unique message keys
+        ('mid:<Message-ID>' and 'sha256:<hash>') for all entries marked with status == 'SUCCESS'.
+        Used by --resume to skip already-imported records.
+        """
+        completed: Set[str] = set()
+        lp = win_long_path(manifest_path)
+        if not os.path.isfile(lp):
+            return completed
+
+        is_jsonl = manifest_path.lower().endswith((".jsonl", ".json", ".ndjson"))
+        try:
+            with open(lp, "r", encoding="utf-8", errors="replace") as f:
+                if is_jsonl:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                            if obj.get("status") == "SUCCESS":
+                                mid = (obj.get("message_id") or "").strip()
+                                sha = (obj.get("sha256") or "").strip()
+                                if mid:
+                                    completed.add(f"mid:{mid}")
+                                if sha:
+                                    completed.add(f"sha256:{sha}")
+                        except Exception:
+                            pass
+                else:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        if row.get("status") == "SUCCESS":
+                            mid = (row.get("message_id") or "").strip()
+                            sha = (row.get("sha256") or "").strip()
+                            if mid:
+                                completed.add(f"mid:{mid}")
+                            if sha:
+                                completed.add(f"sha256:{sha}")
+        except Exception:
+            pass
+        return completed
+
     def print_reconciliation_summary(
         self,
         source: str,
@@ -201,6 +246,7 @@ class AuditLogger:
         failed: int,
         total_bytes: int = 0,
         extra_details: Optional[Dict[str, Any]] = None,
+        skipped_duplicate: int = 0,
     ) -> None:
         elapsed = max(time.time() - start_time, 1e-6)
         rate = exported / elapsed
@@ -217,6 +263,7 @@ class AuditLogger:
             "Message Reconciliation:",
             f"  Total Scanned:       {total_scanned:,}",
             f"  Successfully Saved:  {exported:,} ({100.0 * exported / max(total_scanned, 1):.1f}%)",
+            f"  Skipped (Duplicates): {skipped_duplicate:,}",
             f"  Skipped (Date Filter): {skipped_date:,}",
             f"  Skipped (Deleted):   {skipped_deleted:,}",
             f"  Failed / Errors:     {failed:,}",

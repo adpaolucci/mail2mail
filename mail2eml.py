@@ -104,6 +104,9 @@ def export_to_eml(
     normalize_headers: bool = True,
     progress_every: int = 1000,
     logger: Optional[AuditLogger] = None,
+    dedup: str = "none",
+    resume: Optional[Any] = None,
+    parse_gmail: bool = True,
 ) -> Tuple[int, int, Dict[str, int], Dict[str, int]]:
     """
     Export messages from any supported format into .eml files.
@@ -117,6 +120,19 @@ def export_to_eml(
     active_part: Dict[str, int] = {}
     folder_indices: Dict[str, int] = {}
 
+    seen_keys: Set[str] = set()
+    skipped_duplicate = 0
+
+    if resume:
+        resume_source = resume if isinstance(resume, str) and os.path.isfile(resume) else (logger.audit_log_path if logger else None)
+        if resume_source and os.path.isfile(win_long_path(resume_source)):
+            existing = AuditLogger.load_completed_keys(resume_source)
+            seen_keys.update(existing)
+            if logger:
+                logger.info(f"[*] Resuming: loaded {len(existing):,} previously completed message signatures from {resume_source}")
+        elif resume is not True and logger:
+            logger.warn(f"Resume source manifest not found: {resume}")
+
     exported = 0
     skipped = 0
     skipped_date = 0
@@ -126,11 +142,55 @@ def export_to_eml(
     started = time.time()
     i = 0
 
-    for i, rec in enumerate(iter_mail_records(src_path, include_deleted=True), 1):
+    for i, rec in enumerate(iter_mail_records(src_path, include_deleted=True, parse_gmail=parse_gmail), 1):
         raw = rec.raw_bytes
         msg = _HEADER_PARSER.parsebytes(raw)
         _, _, _, _, is_expunged = extract_message_flags(msg)
         folder_display = os.sep.join(rec.folder_parts) if rec.folder_parts else "Root"
+
+        mid = safe_get_header(msg, "Message-ID", "").strip()
+        is_dup = False
+        dup_key = None
+
+        if dedup != "none" or resume:
+            sha = compute_sha256(raw) if (dedup in ("sha256", "auto") or not mid or resume) else ""
+            if dedup == "message-id":
+                dup_key = f"mid:{mid}" if mid else None
+            elif dedup == "sha256":
+                dup_key = f"sha256:{sha}" if sha else None
+            else:  # auto or resume
+                dup_key = f"mid:{mid}" if mid else (f"sha256:{sha}" if sha else None)
+
+            if dup_key and dup_key in seen_keys:
+                is_dup = True
+
+        if is_dup:
+            skipped += 1
+            skipped_duplicate += 1
+            if logger and logger.audit_log_path:
+                logger.record_message(AuditRecord(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    status="SKIPPED_DUPLICATE",
+                    source_file=rec.source_name,
+                    source_folder=folder_display,
+                    target_location="",
+                    message_id=mid,
+                    subject=safe_get_header(msg, "Subject", "(no subject)"),
+                    date=safe_get_header(msg, "Date", ""),
+                    sender=safe_get_header(msg, "From", ""),
+                    recipients="; ".join(safe_get_all_headers(msg, "To")),
+                    size_bytes=len(raw),
+                    attachment_count=0,
+                    notes="Skipped duplicate message (dedup/resume)",
+                ))
+            continue
+
+        if dup_key:
+            seen_keys.add(dup_key)
+            if mid and (dedup in ("sha256", "auto") or resume):
+                sha = compute_sha256(raw) if not sha else sha
+                seen_keys.add(f"mid:{mid}")
+                seen_keys.add(f"sha256:{sha}")
 
         if not include_deleted and (rec.is_deleted or is_expunged):
             skipped += 1
@@ -270,6 +330,7 @@ def export_to_eml(
             failed=failed,
             total_bytes=total_bytes,
             extra_details={"Distinct EML Directories": f"{len(dir_counts):,}"},
+            skipped_duplicate=skipped_duplicate,
         )
 
     return exported, skipped, dir_counts, dir_bytes
@@ -308,6 +369,26 @@ def build_arg_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
     ap.add_argument("--max-dir-bytes", type=float, default=0.0, help="Max size per directory in GB before rolling to __part2 (0 = unlimited)")
     ap.add_argument("--sanitize-filenames", action="store_true", help="Sanitize filenames (enabled by default)")
     ap.add_argument("--include-deleted", action="store_true", help="Include messages marked expunged/deleted")
+    ap.add_argument(
+        "--dedup",
+        choices=["auto", "message-id", "sha256", "none"],
+        nargs="?",
+        const="auto",
+        default="none",
+        help="Deduplicate messages by Message-ID, SHA-256 content hash, or auto (default: none)",
+    )
+    ap.add_argument(
+        "--resume",
+        nargs="?",
+        const=True,
+        default=None,
+        help="Resume an interrupted migration by skipping messages already marked SUCCESS in the audit log or specified manifest file",
+    )
+    ap.add_argument(
+        "--no-gmail-labels",
+        action="store_true",
+        help="Disable automatic Google Takeout X-Gmail-Labels folder hierarchy reconstruction",
+    )
     ap.add_argument("--progress-every", type=int, default=1000, help="Log progress every N messages (0 = disabled)")
     ap.add_argument("--audit-log", help="Path to write structured audit manifest (.csv or .jsonl)")
     ap.add_argument("--error-log", help="Path to write structured failure report (.jsonl)")
@@ -375,6 +456,9 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
             normalize_headers=True,
             progress_every=args.progress_every,
             logger=logger,
+            dedup=args.dedup,
+            resume=args.resume,
+            parse_gmail=not args.no_gmail_labels,
         )
     finally:
         logger.close()

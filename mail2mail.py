@@ -155,6 +155,14 @@ def _infer_mode(argv: List[str]) -> Tuple[str, List[str]]:
                 explicit_out = cleaned[j + 1]
                 j += 2
                 continue
+        elif flag_name == "--dedup":
+            if "=" not in arg and j + 1 < len(cleaned) and cleaned[j + 1] in ("auto", "message-id", "sha256", "none"):
+                j += 2
+                continue
+        elif flag_name == "--resume":
+            if "=" not in arg and j + 1 < len(cleaned) and not cleaned[j + 1].startswith("-") and cleaned[j + 1].lower().endswith((".csv", ".jsonl", ".json", ".ndjson")):
+                j += 2
+                continue
         elif flag_name in FLAGS_WITH_VALUE and "=" not in arg:
             j += 2
             continue

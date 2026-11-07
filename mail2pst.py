@@ -61,6 +61,7 @@ from mail_formats import (
     decode_imap_utf7,
     decode_mime_words,
     decode_modified_utf7,
+    extract_best_datetime,
     extract_message_flags,
     iter_mail_records,
     pick_year_month,
@@ -557,14 +558,12 @@ def populate_mailitem(mail_item, parsed, msg_bytes: bytes, temp_dir: str, flags=
 
     handle_sender_info(mail_item, parsed)
 
-    date_hdr = safe_get_header(parsed, "Date", "").strip()
-    if date_hdr:
+    dt = extract_best_datetime(parsed)
+    if dt is not None:
         try:
-            dt = parsedate_to_datetime(date_hdr)
-            if dt is not None:
-                utc_dt = to_mapi_utc(pa, dt)
-                set_prop(pa, PR_MESSAGE_DELIVERY_TIME, utc_dt)
-                set_prop(pa, PR_CLIENT_SUBMIT_TIME, utc_dt)
+            utc_dt = to_mapi_utc(pa, dt)
+            set_prop(pa, PR_MESSAGE_DELIVERY_TIME, utc_dt)
+            set_prop(pa, PR_CLIENT_SUBMIT_TIME, utc_dt)
         except Exception:
             pass
 
@@ -664,10 +663,14 @@ def create_or_attach_pst(ns, desired_path: str, overwrite: bool = False):
             pass
 
     if overwrite and os.path.exists(desired_path):
-        try:
-            os.remove(desired_path)
-        except Exception:
-            pass
+        for _attempt in range(5):
+            try:
+                os.remove(desired_path)
+                break
+            except PermissionError:
+                time.sleep(0.25)
+            except Exception:
+                break
 
     existing_ids = set()
     for s in ns.Stores:
@@ -795,10 +798,12 @@ class PstRouter:
         key = normcasepath(path)
         root = self.open_roots.pop(key, None)
         if root is not None:
-            try:
-                self.ns.RemoveStore(root)
-            except Exception:
-                pass
+            for _attempt in range(3):
+                try:
+                    self.ns.RemoveStore(root)
+                    break
+                except Exception:
+                    time.sleep(0.2)
 
     def _initial_existing_bytes(self, desired_path: str) -> int:
         if not self.overwrite and os.path.isfile(desired_path):
@@ -929,8 +934,28 @@ def build_arg_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
     ap.add_argument("--end-year", type=int, default=None, help="Import messages up to this year (inclusive)")
     ap.add_argument("--overwrite-pst", action="store_true", help="Overwrite existing target PST files if present")
     ap.add_argument("--include-deleted", action="store_true", help="Import messages marked expunged/deleted")
-    ap.add_argument("--flush-every", type=int, default=0, help="Detach/reattach PST every N items (0=off)")
+    ap.add_argument("--flush-every", type=int, default=5000, help="Detach/reattach PST every N items to release COM memory (default: 5000, 0=off)")
     ap.add_argument("--count-every", type=int, default=200, help="Print folder Items.Count every N items (0=off)")
+    ap.add_argument(
+        "--dedup",
+        choices=["auto", "message-id", "sha256", "none"],
+        nargs="?",
+        const="auto",
+        default="none",
+        help="Deduplicate messages by Message-ID, SHA-256 content hash, or auto (default: none)",
+    )
+    ap.add_argument(
+        "--resume",
+        nargs="?",
+        const=True,
+        default=None,
+        help="Resume an interrupted migration by skipping messages already marked SUCCESS in the audit log or specified manifest file",
+    )
+    ap.add_argument(
+        "--no-gmail-labels",
+        action="store_true",
+        help="Disable automatic Google Takeout X-Gmail-Labels folder hierarchy reconstruction",
+    )
     ap.add_argument("--audit-log", help="Path to write structured audit manifest (.csv or .jsonl)")
     ap.add_argument("--error-log", help="Path to write structured failure report (.jsonl)")
     ap.add_argument("--log-file", help="Path to write persistent operational log file")
@@ -1022,9 +1047,27 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
     tmpdir = tempfile.mkdtemp(prefix="mail2pst_")
     current_pst = None
 
+    seen_keys: Set[str] = set()
+    skipped_duplicate = 0
+
+    if args.resume:
+        resume_source = args.resume if isinstance(args.resume, str) and os.path.isfile(args.resume) else args.audit_log
+        if resume_source and os.path.isfile(win_long_path(resume_source)):
+            existing = AuditLogger.load_completed_keys(resume_source)
+            seen_keys.update(existing)
+            logger.info(f"[*] Resuming: loaded {len(existing):,} previously completed message signatures from {resume_source}")
+        elif args.resume is not True:
+            logger.warn(f"Resume source manifest not found: {args.resume}")
+
+    if (single_pst_path or args.max_pst_gb == 0) and total_bytes > 45 * (1024**3):
+        logger.warn(
+            f"Source mailbox ({total_bytes / (1024**3):.1f} GB) approaches or exceeds Outlook's default 50 GB single-PST limit.\n"
+            f"       To prevent Outlook COM error 0x8004011D (PST file size limit), consider using --out-dir with --max-pst-gb 15.0 or --split-by year."
+        )
+
     try:
         logger.info(f"Source: {src} | Estimated size: {total_bytes / 1e9:,.2f} GB")
-        for rec in iter_mail_records(src, include_deleted=True):
+        for rec in iter_mail_records(src, include_deleted=True, parse_gmail=not args.no_gmail_labels):
             raw = rec.raw_bytes
             sz = len(raw)
             processed += 1
@@ -1035,6 +1078,50 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
                 msg = parser.parsebytes(raw)
             except Exception:
                 msg = parser.parsebytes(b"Subject: (no subject)\r\n\r\n")
+
+            mid = safe_get_header(msg, "Message-ID", "").strip()
+            is_dup = False
+            dup_key = None
+
+            if args.dedup != "none" or args.resume:
+                sha = compute_sha256(raw) if (args.dedup in ("sha256", "auto") or not mid or args.resume) else ""
+                if args.dedup == "message-id":
+                    dup_key = f"mid:{mid}" if mid else None
+                elif args.dedup == "sha256":
+                    dup_key = f"sha256:{sha}" if sha else None
+                else:  # auto or resume
+                    dup_key = f"mid:{mid}" if mid else (f"sha256:{sha}" if sha else None)
+
+                if dup_key and dup_key in seen_keys:
+                    is_dup = True
+
+            if is_dup:
+                skipped += 1
+                skipped_duplicate += 1
+                if logger and logger.audit_log_path:
+                    logger.record_message(AuditRecord(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        status="SKIPPED_DUPLICATE",
+                        source_file=rec.source_name,
+                        source_folder=folder_display,
+                        target_location="",
+                        message_id=mid,
+                        subject=safe_get_header(msg, "Subject", "(no subject)"),
+                        date=safe_get_header(msg, "Date", ""),
+                        sender=safe_get_header(msg, "From", ""),
+                        recipients="; ".join(safe_get_all_headers(msg, "To")),
+                        size_bytes=sz,
+                        attachment_count=0,
+                        notes="Skipped duplicate message (dedup/resume)",
+                    ))
+                continue
+
+            if dup_key:
+                seen_keys.add(dup_key)
+                if mid and (args.dedup in ("sha256", "auto") or args.resume):
+                    sha = compute_sha256(raw) if not sha else sha
+                    seen_keys.add(f"mid:{mid}")
+                    seen_keys.add(f"sha256:{sha}")
 
             flags = extract_message_flags(msg)
             if (rec.is_deleted or flags[4]) and not args.include_deleted:
@@ -1146,6 +1233,15 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
                 )
                 skipped += 1
 
+            if processed % 500 == 0:
+                if pythoncom is not None:
+                    try:
+                        pythoncom.PumpWaitingMessages()
+                        pythoncom.CoFreeUnusedLibraries()
+                    except Exception:
+                        pass
+                gc.collect()
+
             if args.count_every and processed % args.count_every == 0:
                 try:
                     logger.info(f"\n  Items in '{dest.Name}': {dest.Items.Count}")
@@ -1187,24 +1283,15 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
             exported=imported,
             skipped_date=skipped_date,
             skipped_deleted=skipped_deleted,
-            failed=skipped - skipped_date - skipped_deleted,
+            failed=skipped - skipped_date - skipped_deleted - skipped_duplicate,
             total_bytes=done_bytes,
             extra_details={"Target PST Location": single_pst_path or out_dir},
+            skipped_duplicate=skipped_duplicate,
         )
 
     finally:
         logger.close()
         shutil.rmtree(tmpdir, ignore_errors=True)
-        try:
-            router.close_all()
-        except Exception as e:
-            print("\n[WARN] Failed to close stores:", e)
-        try:
-            gc.collect()
-            if pythoncom is not None:
-                pythoncom.CoUninitialize()
-        except Exception:
-            pass
         try:
             router.close_all()
         except Exception as e:
