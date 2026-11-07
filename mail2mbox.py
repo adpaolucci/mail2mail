@@ -79,6 +79,11 @@ def build_mbox_from_line(msg, fallback_dt: Optional[datetime] = None) -> bytes:
                 break
 
     dt = fallback_dt
+    if isinstance(dt, str):
+        try:
+            dt = parsedate_to_datetime(dt)
+        except Exception:
+            dt = None
     if dt is None:
         date_str = safe_get_header(msg, "Date", "").strip()
         if date_str:
@@ -95,9 +100,11 @@ def build_mbox_from_line(msg, fallback_dt: Optional[datetime] = None) -> bytes:
         dt = dt.replace(tzinfo=timezone.utc)
 
     if dt.year < 1900:
-        dt = dt.replace(year=1970)
+        day = min(dt.day, 28) if dt.month == 2 else dt.day
+        dt = dt.replace(year=1970, day=day)
     elif dt.year > 2100:
-        dt = dt.replace(year=2100)
+        day = min(dt.day, 28) if dt.month == 2 else dt.day
+        dt = dt.replace(year=2100, day=day)
 
     asctime_str = time.asctime(dt.utctimetuple())
     line = f"From {sender} {asctime_str}\n"

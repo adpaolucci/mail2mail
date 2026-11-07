@@ -197,9 +197,11 @@ def to_mapi_utc(pa, dt: datetime) -> datetime:
     else:
         dt = dt.astimezone(timezone.utc)
     if dt.year < 1970:
-        dt = dt.replace(year=1970)
+        day = min(dt.day, 28) if dt.month == 2 else dt.day
+        dt = dt.replace(year=1970, day=day)
     elif dt.year > 2100:
-        dt = dt.replace(year=2100)
+        day = min(dt.day, 28) if dt.month == 2 else dt.day
+        dt = dt.replace(year=2100, day=day)
     return dt.replace(tzinfo=None)
 
 

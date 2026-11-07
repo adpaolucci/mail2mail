@@ -9,23 +9,30 @@ tests/test_real_world_hardening.py — Tests for production-scale migration hard
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import email
 from email.message import EmailMessage
+import io
 import os
 import shutil
 import tempfile
 import unittest
 
 import tests  # noqa: F401
+from datetime import datetime, timezone
 from mail_formats import (
     extract_attachment_filename,
     extract_best_datetime,
+    inject_mozilla_status_bytes,
     iter_mail_records,
+    normalize_eml_bytes_with_flags,
     parse_gmail_labels,
+    parse_msg_bytes,
     pick_year_month,
+    sanitize_name,
 )
-from mail_audit import AuditLogger, AuditRecord, compute_sha256
+from mail_audit import AuditLogger, AuditRecord, compute_sha256, perform_dry_run
 import mail2eml
 import mail2mbox
 from mail2pst import (
@@ -37,6 +44,7 @@ from mail2pst import (
     PR_LAST_MODIFICATION_TIME,
     PR_MESSAGE_FLAGS,
     PstRouter,
+    to_mapi_utc,
 )
 
 
@@ -376,6 +384,84 @@ class TestRealWorldHardening(unittest.TestCase):
         self.assertEqual(final_flags & MSGFLAG_READ, MSGFLAG_READ)
         # MSGFLAG_HASATTACH (0x10) MUST BE SET
         self.assertEqual(final_flags & MSGFLAG_HASATTACH, MSGFLAG_HASATTACH)
+
+    def test_fuzz_hardening_leap_year_clamping(self):
+        # 1. to_mapi_utc with leap day before 1970
+        dt_pre1970 = datetime(1968, 2, 29, 12, 0, 0, tzinfo=timezone.utc)
+        mapi_dt1 = to_mapi_utc(None, dt_pre1970)
+        self.assertEqual(mapi_dt1.year, 1970)
+        self.assertEqual(mapi_dt1.month, 2)
+        self.assertEqual(mapi_dt1.day, 28)
+
+        # 2. to_mapi_utc with leap day after 2100
+        dt_post2100 = datetime(2400, 2, 29, 12, 0, 0, tzinfo=timezone.utc)
+        mapi_dt2 = to_mapi_utc(None, dt_post2100)
+        self.assertEqual(mapi_dt2.year, 2100)
+        self.assertEqual(mapi_dt2.month, 2)
+        self.assertEqual(mapi_dt2.day, 28)
+
+        # 3. mail2mbox.build_mbox_from_line with leap days
+        from_line1 = mail2mbox.build_mbox_from_line(None, "Thu, 29 Feb 1888 12:00:00 +0000")
+        self.assertIn(b"1970", from_line1)
+        self.assertIn(b"Feb 28", from_line1)
+
+        from_line2 = mail2mbox.build_mbox_from_line(None, "Sat, 29 Feb 2400 12:00:00 +0000")
+        self.assertIn(b"2100", from_line2)
+        self.assertIn(b"Feb 28", from_line2)
+
+    def test_fuzz_hardening_null_flags_handling(self):
+        raw = b"From: user@example.com\r\nSubject: Test\r\n\r\nMessage body"
+        # normalize_eml_bytes_with_flags with flags=None
+        norm = normalize_eml_bytes_with_flags(raw, None)
+        self.assertIn(b"Subject: Test", norm)
+        self.assertIn(b"Status: RO", norm)
+
+        # inject_mozilla_status_bytes with flags=None
+        injected = inject_mozilla_status_bytes(raw, None)
+        self.assertIn(b"X-Mozilla-Status: 0001", injected)
+
+        # format_mboxrd_entry with flags=None and msg=None
+        entry = mail2mbox.format_mboxrd_entry(raw)
+        self.assertTrue(entry.startswith(b"From "))
+        self.assertIn(b"Status: RO", entry)
+
+    def test_fuzz_hardening_mixed_timezone_audit(self):
+        # Create temporary mbox with a mix of timezone-aware and naive Date headers
+        mbox_path = os.path.join(self.tmpdir, "mixed_tz.mbox")
+        with open(mbox_path, "wb") as f:
+            f.write(b"From a@b Wed Oct 25 10:00:00 2023\n")
+            f.write(b"Date: Wed, 25 Oct 2023 10:00:00 +0000\n")
+            f.write(b"Subject: Aware Date\n\nMsg1\n\n")
+            f.write(b"From a@b Thu Oct 26 10:00:00 2023\n")
+            f.write(b"Date: 26 Oct 2023 11:00:00 -0000\n")  # Often parses as naive
+            f.write(b"Subject: Naive Date\n\nMsg2\n\n")
+            f.write(b"From a@b Fri Oct 27 10:00:00 2023\n")
+            f.write(b"Date: 27 Oct 2023 12:00:00\n")  # Missing timezone offset
+            f.write(b"Subject: Missing Offset\n\nMsg3\n\n")
+
+        # perform_dry_run should safely compute earliest/latest dates without TypeError
+        with io.StringIO() as buf, contextlib.redirect_stdout(buf):
+            perform_dry_run(mbox_path)
+            output = buf.getvalue()
+        self.assertIn("Total Messages:          3", output)
+        self.assertIn("Wed, 25 Oct 2023 10:00:00 +0000", output)
+        self.assertIn("27 Oct 2023 12:00:00", output)
+
+    def test_fuzz_hardening_corrupted_msg_bytes(self):
+        # parse_msg_bytes with arbitrary garbage
+        garbage = b"\x00\xff\xfe\x12\x34\x56\x78" * 50
+        raw, flags = parse_msg_bytes(garbage, strict=False)
+        self.assertEqual(raw, b"")
+        self.assertIsInstance(flags, dict)
+
+        # parse_msg_bytes with strict=True raises ValueError
+        with self.assertRaises(ValueError):
+            parse_msg_bytes(garbage, strict=True)
+
+    def test_fuzz_hardening_sanitize_name_strict_length(self):
+        for max_len in range(1, 20):
+            res = sanitize_name("very_long_file_name_with_an_extension.tar.gz", max_len=max_len)
+            self.assertLessEqual(len(res), max_len, f"Failed for max_len={max_len}: {res}")
 
 
 if __name__ == "__main__":

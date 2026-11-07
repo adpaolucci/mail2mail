@@ -379,12 +379,17 @@ def perform_dry_run(src_path: str, max_attach_mb: float = 25.0) -> None:
         if date_hdr:
             try:
                 dt = email.utils.parsedate_to_datetime(date_hdr)
-                if earliest_val is None or dt < earliest_val:
-                    earliest_val = dt
-                    earliest_date = date_hdr
-                if latest_val is None or dt > latest_val:
-                    latest_val = dt
-                    latest_date = date_hdr
+                if dt is not None:
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    else:
+                        dt = dt.astimezone(timezone.utc)
+                    if earliest_val is None or dt < earliest_val:
+                        earliest_val = dt
+                        earliest_date = date_hdr
+                    if latest_val is None or dt > latest_val:
+                        latest_val = dt
+                        latest_date = date_hdr
             except Exception:
                 pass
 

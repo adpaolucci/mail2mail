@@ -225,9 +225,12 @@ def sanitize_name(s: str, default: str = "item", max_len: int = 120) -> str:
         s = f"_{s}"
     if len(s) > max_len:
         base, ext = os.path.splitext(s)
-        if ext and len(ext) <= 12:
+        if ext and len(ext) <= 12 and len(ext) < max_len:
             keep = max(1, max_len - len(ext))
-            s = base[:keep].rstrip(" .") + ext
+            base_part = base[:keep].rstrip(" .")
+            s = (base_part or "_") + ext
+            if len(s) > max_len:
+                s = s[:max_len].rstrip(" .")
         else:
             s = s[:max_len].strip(" .")
     return s or default
@@ -655,8 +658,9 @@ def update_status_headers(
     return b"".join(filtered_lines)
 
 
-def normalize_eml_bytes_with_flags(raw_bytes: bytes, flags: Dict[str, bool]) -> bytes:
+def normalize_eml_bytes_with_flags(raw_bytes: bytes, flags: Optional[Dict[str, bool]] = None) -> bytes:
     """Split raw RFC 822 message into headers + body and apply update_status_headers."""
+    flags = flags or {}
     sep_crlf = raw_bytes.find(b"\r\n\r\n")
     sep_lf = raw_bytes.find(b"\n\n")
     if sep_crlf != -1 and (sep_lf == -1 or sep_crlf < sep_lf):
@@ -679,13 +683,14 @@ def normalize_eml_bytes_with_flags(raw_bytes: bytes, flags: Dict[str, bool]) -> 
     return norm_hdr.rstrip(b"\r\n") + b"\r\n\r\n" + body
 
 
-def inject_mozilla_status_bytes(raw_bytes: bytes, flags: Dict[str, bool]) -> bytes:
+def inject_mozilla_status_bytes(raw_bytes: bytes, flags: Optional[Dict[str, bool]] = None) -> bytes:
     """
     Ensure X-Mozilla-Status (and Status/X-Status) headers exist in raw_bytes
     so downstream EML, MBOX, and PST tools preserve Read/Replied/Flagged/Forwarded state.
     """
     if not raw_bytes:
         return raw_bytes
+    flags = flags or {}
     _, has_hdr = extract_flags_from_headers(raw_bytes)
     if has_hdr:
         return raw_bytes
@@ -1051,166 +1056,173 @@ def _parse_msg_fixed_props(ole: _Ole2Reader, prefix: str = "") -> Dict[int, int]
     return props
 
 
-def parse_msg_bytes(data: bytes) -> Tuple[bytes, Dict[str, bool]]:
+def parse_msg_bytes(data: bytes, strict: bool = False) -> Tuple[bytes, Dict[str, bool]]:
     """
     Parse an Outlook .msg (OLE2 MS-OXMSG) binary buffer into an RFC 5322 EmailMessage
     byte string and normalized status flags.
+    If the buffer is not a valid or readable OLE2 container, returns (b"", default_flags())
+    when strict=False (default), or raises the underlying error if strict=True.
     """
-    ole = _Ole2Reader(data)
-    fixed_props = _parse_msg_fixed_props(ole, "")
+    try:
+        ole = _Ole2Reader(data)
+        fixed_props = _parse_msg_fixed_props(ole, "")
 
-    msg_flags = fixed_props.get(0x0E070003, 0x01) & 0xFFFFFFFF
-    flag_status = fixed_props.get(0x10900003, 0) & 0xFFFFFFFF
-    last_verb = fixed_props.get(0x10810003, 0) & 0xFFFFFFFF
+        msg_flags = fixed_props.get(0x0E070003, 0x01) & 0xFFFFFFFF
+        flag_status = fixed_props.get(0x10900003, 0) & 0xFFFFFFFF
+        last_verb = fixed_props.get(0x10810003, 0) & 0xFFFFFFFF
 
-    flags = default_flags(
-        is_read=bool(msg_flags & 0x01),
-        is_replied=(last_verb in (102, 103)),
-        is_flagged=(flag_status == 2),
-        is_forwarded=(last_verb == 104),
-        is_deleted=False,
-    )
-
-    transport_headers = _get_msg_prop_str(ole, "", "007D")
-    subject = _get_msg_prop_str(ole, "", "0037")
-    body_text = _get_msg_prop_str(ole, "", "1000")
-    body_html = _get_msg_prop_str(ole, "", "1013")
-    if not body_html:
-        html_bin = _get_msg_prop_bin(ole, "", "1013")
-        if html_bin:
-            try:
-                body_html = html_bin.decode("utf-8")
-            except UnicodeDecodeError:
-                body_html = html_bin.decode("cp1252", errors="replace")
-
-    sender_name = _get_msg_prop_str(ole, "", "0C1A") or _get_msg_prop_str(ole, "", "0042")
-    sender_email = (
-        _get_msg_prop_str(ole, "", "5D01")
-        or _get_msg_prop_str(ole, "", "0C1F")
-        or _get_msg_prop_str(ole, "", "5D02")
-        or _get_msg_prop_str(ole, "", "0065")
-    )
-    msg_id = _get_msg_prop_str(ole, "", "1035")
-
-    recip_storages = sorted({
-        p.split("/")[0]
-        for p in ole.streams
-        if p.upper().startswith("__RECIP_VERSION1.0_#")
-    })
-    to_list: List[str] = []
-    cc_list: List[str] = []
-    bcc_list: List[str] = []
-    for r_prefix in recip_storages:
-        r_props = _parse_msg_fixed_props(ole, r_prefix)
-        r_type = r_props.get(0x0C150003, 1) & 0xFFFFFFFF
-        r_name = _get_msg_prop_str(ole, r_prefix, "3001")
-        r_email = _get_msg_prop_str(ole, r_prefix, "39FE") or _get_msg_prop_str(ole, r_prefix, "3003")
-        formatted = email.utils.formataddr((r_name, r_email)) if r_email else r_name
-        if not formatted:
-            continue
-        if r_type == 2:
-            cc_list.append(formatted)
-        elif r_type == 3:
-            bcc_list.append(formatted)
-        else:
-            to_list.append(formatted)
-
-    if not to_list:
-        disp_to = _get_msg_prop_str(ole, "", "0E04")
-        if disp_to:
-            to_list = [disp_to]
-    if not cc_list:
-        disp_cc = _get_msg_prop_str(ole, "", "0E03")
-        if disp_cc:
-            cc_list = [disp_cc]
-    if not bcc_list:
-        disp_bcc = _get_msg_prop_str(ole, "", "0E02")
-        if disp_bcc:
-            bcc_list = [disp_bcc]
-
-    date_str = ""
-    ft = fixed_props.get(0x0E060040) or fixed_props.get(0x00390040)
-    if ft and ft > 0:
-        try:
-            dt = datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=ft // 10)
-            if 1970 <= dt.year <= 2100:
-                date_str = email.utils.format_datetime(dt)
-        except Exception:
-            pass
-
-    if not date_str and transport_headers:
-        m_date = re.search(r"(?im)^Date\s*:\s*([^\r\n]+)", transport_headers)
-        if m_date:
-            date_str = m_date.group(1).strip()
-
-    msg = EmailMessage()
-    if subject:
-        msg["Subject"] = subject
-    if sender_email or sender_name:
-        msg["From"] = email.utils.formataddr((sender_name, sender_email)) if "@" in sender_email else (sender_name or sender_email)
-    elif transport_headers:
-        m_from = re.search(r"(?im)^From\s*:\s*([^\r\n]+)", transport_headers)
-        if m_from:
-            msg["From"] = m_from.group(1).strip()
-
-    if to_list:
-        msg["To"] = ", ".join(to_list)
-    if cc_list:
-        msg["Cc"] = ", ".join(cc_list)
-    if bcc_list:
-        msg["Bcc"] = ", ".join(bcc_list)
-    if date_str:
-        msg["Date"] = date_str
-    if msg_id:
-        msg["Message-ID"] = msg_id
-    msg["X-Mozilla-Status"] = flags_to_mozilla_status_hex(flags)
-
-    if body_text and body_html:
-        msg.set_content(body_text)
-        msg.add_alternative(body_html, subtype="html")
-    elif body_html:
-        msg.set_content(body_html, subtype="html")
-    else:
-        msg.set_content(body_text or "")
-
-    attach_storages = sorted({
-        p.split("/")[0]
-        for p in ole.streams
-        if p.upper().startswith("__ATTACH_VERSION1.0_#")
-    })
-    for a_prefix in attach_storages:
-        att_data = _get_msg_prop_bin(ole, a_prefix, "3701")
-        if not att_data:
-            continue
-        att_name = (
-            _get_msg_prop_str(ole, a_prefix, "3707")
-            or _get_msg_prop_str(ole, a_prefix, "3704")
-            or "attachment.bin"
+        flags = default_flags(
+            is_read=bool(msg_flags & 0x01),
+            is_replied=(last_verb in (102, 103)),
+            is_flagged=(flag_status == 2),
+            is_forwarded=(last_verb == 104),
+            is_deleted=False,
         )
-        att_mime = _get_msg_prop_str(ole, a_prefix, "370E")
-        if not att_mime or "/" not in att_mime:
-            guessed, _ = mimetypes.guess_type(att_name)
-            att_mime = guessed or "application/octet-stream"
-        maintype, subtype = att_mime.split("/", 1)
-        att_cid = _get_msg_prop_str(ole, a_prefix, "3712").strip("<>")
-        if att_cid:
-            msg.add_attachment(
-                att_data,
-                maintype=maintype,
-                subtype=subtype,
-                filename=att_name,
-                cid=f"<{att_cid}>",
-                disposition="inline",
-            )
-        else:
-            msg.add_attachment(
-                att_data,
-                maintype=maintype,
-                subtype=subtype,
-                filename=att_name,
-            )
 
-    return msg.as_bytes(policy=policy.SMTP), flags
+        transport_headers = _get_msg_prop_str(ole, "", "007D")
+        subject = _get_msg_prop_str(ole, "", "0037")
+        body_text = _get_msg_prop_str(ole, "", "1000")
+        body_html = _get_msg_prop_str(ole, "", "1013")
+        if not body_html:
+            html_bin = _get_msg_prop_bin(ole, "", "1013")
+            if html_bin:
+                try:
+                    body_html = html_bin.decode("utf-8")
+                except UnicodeDecodeError:
+                    body_html = html_bin.decode("cp1252", errors="replace")
+
+        sender_name = _get_msg_prop_str(ole, "", "0C1A") or _get_msg_prop_str(ole, "", "0042")
+        sender_email = (
+            _get_msg_prop_str(ole, "", "5D01")
+            or _get_msg_prop_str(ole, "", "0C1F")
+            or _get_msg_prop_str(ole, "", "5D02")
+            or _get_msg_prop_str(ole, "", "0065")
+        )
+        msg_id = _get_msg_prop_str(ole, "", "1035")
+
+        recip_storages = sorted({
+            p.split("/")[0]
+            for p in ole.streams
+            if p.upper().startswith("__RECIP_VERSION1.0_#")
+        })
+        to_list: List[str] = []
+        cc_list: List[str] = []
+        bcc_list: List[str] = []
+        for r_prefix in recip_storages:
+            r_props = _parse_msg_fixed_props(ole, r_prefix)
+            r_type = r_props.get(0x0C150003, 1) & 0xFFFFFFFF
+            r_name = _get_msg_prop_str(ole, r_prefix, "3001")
+            r_email = _get_msg_prop_str(ole, r_prefix, "39FE") or _get_msg_prop_str(ole, r_prefix, "3003")
+            formatted = email.utils.formataddr((r_name, r_email)) if r_email else r_name
+            if not formatted:
+                continue
+            if r_type == 2:
+                cc_list.append(formatted)
+            elif r_type == 3:
+                bcc_list.append(formatted)
+            else:
+                to_list.append(formatted)
+
+        if not to_list:
+            disp_to = _get_msg_prop_str(ole, "", "0E04")
+            if disp_to:
+                to_list = [disp_to]
+        if not cc_list:
+            disp_cc = _get_msg_prop_str(ole, "", "0E03")
+            if disp_cc:
+                cc_list = [disp_cc]
+        if not bcc_list:
+            disp_bcc = _get_msg_prop_str(ole, "", "0E02")
+            if disp_bcc:
+                bcc_list = [disp_bcc]
+
+        date_str = ""
+        ft = fixed_props.get(0x0E060040) or fixed_props.get(0x00390040)
+        if ft and ft > 0:
+            try:
+                dt = datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=ft // 10)
+                if 1970 <= dt.year <= 2100:
+                    date_str = email.utils.format_datetime(dt)
+            except Exception:
+                pass
+
+        if not date_str and transport_headers:
+            m_date = re.search(r"(?im)^Date\s*:\s*([^\r\n]+)", transport_headers)
+            if m_date:
+                date_str = m_date.group(1).strip()
+
+        msg = EmailMessage()
+        if subject:
+            msg["Subject"] = subject
+        if sender_email or sender_name:
+            msg["From"] = email.utils.formataddr((sender_name, sender_email)) if "@" in sender_email else (sender_name or sender_email)
+        elif transport_headers:
+            m_from = re.search(r"(?im)^From\s*:\s*([^\r\n]+)", transport_headers)
+            if m_from:
+                msg["From"] = m_from.group(1).strip()
+
+        if to_list:
+            msg["To"] = ", ".join(to_list)
+        if cc_list:
+            msg["Cc"] = ", ".join(cc_list)
+        if bcc_list:
+            msg["Bcc"] = ", ".join(bcc_list)
+        if date_str:
+            msg["Date"] = date_str
+        if msg_id:
+            msg["Message-ID"] = msg_id
+        msg["X-Mozilla-Status"] = flags_to_mozilla_status_hex(flags)
+
+        if body_text and body_html:
+            msg.set_content(body_text)
+            msg.add_alternative(body_html, subtype="html")
+        elif body_html:
+            msg.set_content(body_html, subtype="html")
+        else:
+            msg.set_content(body_text or "")
+
+        attach_storages = sorted({
+            p.split("/")[0]
+            for p in ole.streams
+            if p.upper().startswith("__ATTACH_VERSION1.0_#")
+        })
+        for a_prefix in attach_storages:
+            att_data = _get_msg_prop_bin(ole, a_prefix, "3701")
+            if not att_data:
+                continue
+            att_name = (
+                _get_msg_prop_str(ole, a_prefix, "3707")
+                or _get_msg_prop_str(ole, a_prefix, "3704")
+                or "attachment.bin"
+            )
+            att_mime = _get_msg_prop_str(ole, a_prefix, "370E")
+            if not att_mime or "/" not in att_mime:
+                guessed, _ = mimetypes.guess_type(att_name)
+                att_mime = guessed or "application/octet-stream"
+            maintype, subtype = att_mime.split("/", 1)
+            att_cid = _get_msg_prop_str(ole, a_prefix, "3712").strip("<>")
+            if att_cid:
+                msg.add_attachment(
+                    att_data,
+                    maintype=maintype,
+                    subtype=subtype,
+                    filename=att_name,
+                    cid=f"<{att_cid}>",
+                    disposition="inline",
+                )
+            else:
+                msg.add_attachment(
+                    att_data,
+                    maintype=maintype,
+                    subtype=subtype,
+                    filename=att_name,
+                )
+
+        return msg.as_bytes(policy=policy.SMTP), flags
+    except Exception:
+        if strict:
+            raise
+        return b"", default_flags()
 
 
 # ----------------------- 4. Outlook for Mac .olm Archives -----------------------
