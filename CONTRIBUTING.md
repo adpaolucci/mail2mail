@@ -8,7 +8,7 @@ Thank you for your interest in contributing to **`mail2mail`**!
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/andrewpaolucci/mail2mail.git
+   git clone https://github.com/adpaolucci/mail2mail.git
    cd mail2mail
    ```
 2. Install in editable mode:
