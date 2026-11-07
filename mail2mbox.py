@@ -346,6 +346,7 @@ def export_to_mbox(
     idx = 0
 
     seen_keys: Set[str] = set()
+    seen_mid_signatures: Dict[str, Tuple[str, str, str]] = {}
     if resume:
         resume_source = resume if isinstance(resume, str) and os.path.isfile(resume) else (logger.audit_log_path if logger else None)
         if resume_source and os.path.isfile(win_long_path(resume_source)):
@@ -373,6 +374,8 @@ def export_to_mbox(
                 msg = email.message_from_bytes(b"Subject: (no subject)\r\n\r\n", policy=policy.default)
 
             mid = safe_get_header(msg, "Message-ID", "").strip()
+            subj_val = safe_get_header(msg, "Subject", "(no subject)").strip()
+            date_val = safe_get_header(msg, "Date", "").strip()
             is_dup = False
             dup_key = None
 
@@ -380,13 +383,31 @@ def export_to_mbox(
                 sha = compute_sha256(raw_bytes) if (dedup in ("sha256", "auto") or not mid or resume) else ""
                 if dedup == "message-id":
                     dup_key = f"mid:{mid}" if mid else None
+                    if dup_key and dup_key in seen_keys:
+                        is_dup = True
                 elif dedup == "sha256":
                     dup_key = f"sha256:{sha}" if sha else None
+                    if dup_key and dup_key in seen_keys:
+                        is_dup = True
                 else:  # auto or resume
-                    dup_key = f"mid:{mid}" if mid else (f"sha256:{sha}" if sha else None)
-
-                if dup_key and dup_key in seen_keys:
-                    is_dup = True
+                    if resume and mid and f"mid:{mid}" in seen_keys:
+                        is_dup = True
+                        dup_key = f"mid:{mid}"
+                    elif resume and sha and f"sha256:{sha}" in seen_keys:
+                        is_dup = True
+                        dup_key = f"sha256:{sha}"
+                    elif dedup == "auto":
+                        if mid and mid in seen_mid_signatures:
+                            prev_sha, prev_subj, prev_date = seen_mid_signatures[mid]
+                            if sha == prev_sha or (prev_date and prev_date == date_val) or (prev_subj and prev_subj == subj_val):
+                                is_dup = True
+                                dup_key = f"mid:{mid}"
+                            # else: distinct message colliding on Message-ID, preserve it!
+                        elif sha and f"sha256:{sha}" in seen_keys:
+                            is_dup = True
+                            dup_key = f"sha256:{sha}"
+                        else:
+                            dup_key = f"mid:{mid}" if mid else (f"sha256:{sha}" if sha else None)
 
             if is_dup:
                 skipped += 1
@@ -411,10 +432,12 @@ def export_to_mbox(
 
             if dup_key:
                 seen_keys.add(dup_key)
-                if mid and (dedup in ("sha256", "auto") or resume):
-                    sha = compute_sha256(raw_bytes) if not sha else sha
-                    seen_keys.add(f"mid:{mid}")
-                    seen_keys.add(f"sha256:{sha}")
+                if mid:
+                    seen_mid_signatures[mid] = (sha, subj_val, date_val)
+                    if dedup in ("sha256", "auto") or resume:
+                        sha = compute_sha256(raw_bytes) if not sha else sha
+                        seen_keys.add(f"mid:{mid}")
+                        seen_keys.add(f"sha256:{sha}")
 
             msg_flags_tuple = extract_message_flags(msg)
             flags = rec.flags if rec.flags is not None else msg_flags_tuple
@@ -502,6 +525,20 @@ def export_to_mbox(
             except Exception as e:
                 skipped += 1
                 failed += 1
+                # Zero-Data-Loss Emergency Fallback: preserve unwritten bytes to disk
+                fallback_base = target_path if not single_file_mode else os.path.dirname(target_path)
+                fb_dir = os.path.join(fallback_base or ".", "_unwritten_messages")
+                ensure_dir(fb_dir)
+                subj = sanitize_name(safe_get_header(msg, "Subject", "msg") or "msg", max_len=60)
+                fb_path = os.path.join(fb_dir, f"unwritten_{written + failed}_{subj}.eml")
+                try:
+                    with open(win_long_path(fb_path), "wb") as fb:
+                        fb.write(raw_bytes)
+                    if logger:
+                        logger.warn(f"Emergency preservation: saved unwritten message to {fb_path}")
+                except Exception:
+                    pass
+
                 if logger:
                     logger.error(f"Failed to write mbox entry to {dest_mbox}", exc=e)
                     logger.record_failure(

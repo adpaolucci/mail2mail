@@ -19,9 +19,11 @@ import shutil
 import tempfile
 import unittest
 
+import gzip
 import tests  # noqa: F401
 from datetime import datetime, timezone
 from mail_formats import (
+    _iter_records_from_bytes,
     extract_attachment_filename,
     extract_best_datetime,
     inject_mozilla_status_bytes,
@@ -44,6 +46,7 @@ from mail2pst import (
     PR_LAST_MODIFICATION_TIME,
     PR_MESSAGE_FLAGS,
     PstRouter,
+    add_attachments,
     to_mapi_utc,
 )
 
@@ -462,6 +465,132 @@ class TestRealWorldHardening(unittest.TestCase):
         for max_len in range(1, 20):
             res = sanitize_name("very_long_file_name_with_an_extension.tar.gz", max_len=max_len)
             self.assertLessEqual(len(res), max_len, f"Failed for max_len={max_len}: {res}")
+
+    def test_zero_data_loss_nested_compressed_archive_stream(self):
+        # Create an in-memory mbox.gz with 2 messages
+        mbox_data = (
+            b"From user1@example.com Wed Oct 25 10:00:00 2023\n"
+            b"Subject: First Nested Message\n\nBody 1\n\n"
+            b"From user2@example.com Wed Oct 25 11:00:00 2023\n"
+            b"Subject: Second Nested Message\n\nBody 2\n\n"
+        )
+        gz_buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=gz_buf, mode="wb") as gz:
+            gz.write(mbox_data)
+        gz_bytes = gz_buf.getvalue()
+
+        records = list(_iter_records_from_bytes(gz_bytes, ["ArchiveFolder"], "nested.mbox.gz"))
+        self.assertEqual(len(records), 2, "Both messages inside nested mbox.gz must be extracted without loss")
+        self.assertIn(b"Subject: First Nested Message", records[0].raw_bytes)
+        self.assertIn(b"Subject: Second Nested Message", records[1].raw_bytes)
+
+    def test_zero_data_loss_dedup_auto_retains_different_messages_with_same_mid(self):
+        # Two distinct messages sharing Message-ID: <shared-id@example.com>
+        # (e.g. from broken bot or automated notifications)
+        msg1_bytes = (
+            b"From: sender1@example.com\r\n"
+            b"Message-ID: <shared-id@example.com>\r\n"
+            b"Subject: Important Contract Document\r\n"
+            b"Date: Wed, 25 Oct 2023 10:00:00 +0000\r\n\r\n"
+            b"Contract terms..."
+        )
+        msg2_bytes = (
+            b"From: sender2@example.com\r\n"
+            b"Message-ID: <shared-id@example.com>\r\n"
+            b"Subject: Urgent Server Security Alert\r\n"
+            b"Date: Thu, 26 Oct 2023 12:00:00 +0000\r\n\r\n"
+            b"Alert details..."
+        )
+        src_mbox = os.path.join(self.tmpdir, "shared_mid.mbox")
+        with open(src_mbox, "wb") as f:
+            f.write(b"From a@b Wed Oct 25 10:00:00 2023\n" + msg1_bytes + b"\n\n")
+            f.write(b"From a@b Thu Oct 26 12:00:00 2023\n" + msg2_bytes + b"\n\n")
+
+        # Export with --dedup auto to EML
+        eml_out = os.path.join(self.tmpdir, "eml_out_shared_mid")
+        exported, skipped, _, _ = mail2eml.export_to_eml(src_mbox, eml_out, dedup="auto")
+        # BOTH messages must be retained since their subject/dates differ completely
+        self.assertEqual(exported, 2, "Distinct messages with colliding Message-ID must both be retained")
+        self.assertEqual(skipped, 0)
+
+        # Export with --dedup auto to MBOX
+        mbox_out = os.path.join(self.tmpdir, "mbox_out_shared_mid.mbox")
+        written, skipped_m = mail2mbox.export_to_mbox(src_mbox, mbox_out, dedup="auto")
+        self.assertEqual(written, 2, "Distinct messages with colliding Message-ID must both be retained in MBOX")
+        self.assertEqual(skipped_m, 0)
+
+    def test_zero_data_loss_eml_collision_prevention(self):
+        # Create an existing file in destination folder
+        dest_dir = os.path.join(self.tmpdir, "eml_collision_dest", "new_message")
+        os.makedirs(dest_dir, exist_ok=True)
+        existing_file = os.path.join(dest_dir, "000001.eml")
+        with open(existing_file, "wb") as f:
+            f.write(b"Original Existing EML Content")
+
+        # Export a new message with naming='index'
+        src_eml = os.path.join(self.tmpdir, "new_message.eml")
+        with open(src_eml, "wb") as f:
+            f.write(b"From: test@example.com\r\nSubject: New Msg\r\n\r\nNew body content")
+
+        out_root = os.path.join(self.tmpdir, "eml_collision_dest")
+        exported, _, _, _ = mail2eml.export_to_eml(src_eml, out_root, naming="index")
+        self.assertEqual(exported, 1)
+
+        # Verify existing file was NOT overwritten
+        with open(existing_file, "rb") as f:
+            self.assertEqual(f.read(), b"Original Existing EML Content")
+
+        # Verify new file was written with clean incremented index
+        new_file = os.path.join(dest_dir, "000002.eml")
+        self.assertTrue(os.path.exists(new_file), "New file must be saved under clean next index")
+        with open(new_file, "rb") as f:
+            self.assertIn(b"New body content", f.read())
+
+    def test_zero_data_loss_unattached_files_preserved_on_disk(self):
+        # Test add_attachments emergency preservation to disk when COM raises
+        raw = (
+            b"Content-Type: multipart/mixed; boundary=\"BOUNDARY\"\r\n\r\n"
+            b"--BOUNDARY\r\n"
+            b"Content-Type: text/plain\r\n\r\n"
+            b"Body\r\n"
+            b"--BOUNDARY\r\n"
+            b"Content-Type: application/octet-stream; name=\"large_report.pdf\"\r\n"
+            b"Content-Disposition: attachment; filename=\"large_report.pdf\"\r\n\r\n"
+            b"PAYLOAD_BYTES_HERE_FOR_EMERGENCY_PRESERVATION\r\n"
+            b"--BOUNDARY--"
+        )
+        parsed = email.message_from_bytes(raw)
+        
+        # Mock mail object whose Attachments.Add raises a simulated COM error
+        class MockAttachments:
+            def Add(self, *args, **kwargs):
+                raise RuntimeError("Simulated Outlook 4096: The attachment size exceeds the allowable limit.")
+
+        class MockMail:
+            Attachments = MockAttachments()
+
+        out_dir = os.path.join(self.tmpdir, "pst_output_test")
+        tmp_work = os.path.join(self.tmpdir, "work_tmp")
+        os.makedirs(out_dir, exist_ok=True)
+        os.makedirs(tmp_work, exist_ok=True)
+
+        skipped_oversized = []
+        count, has_cid = add_attachments(
+            MockMail(),
+            parsed,
+            tmpdir=tmp_work,
+            skipped_oversized=skipped_oversized,
+            out_dir=out_dir,
+        )
+        self.assertEqual(len(skipped_oversized), 1)
+
+        # Verify attachment was safely preserved on disk in _unattached_files
+        unattached_dir = os.path.join(out_dir, "_unattached_files")
+        self.assertTrue(os.path.isdir(unattached_dir))
+        files = os.listdir(unattached_dir)
+        self.assertIn("large_report.pdf", files)
+        with open(os.path.join(unattached_dir, "large_report.pdf"), "rb") as f:
+            self.assertEqual(f.read(), b"PAYLOAD_BYTES_HERE_FOR_EMERGENCY_PRESERVATION")
 
 
 if __name__ == "__main__":

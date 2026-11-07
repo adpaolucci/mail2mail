@@ -1917,6 +1917,8 @@ def _sniff_stream_format(header_bytes: bytes) -> str:
         return "bz2"
     if header_bytes.startswith(b"\xfd7zXZ\x00"):
         return "xz"
+    if len(header_bytes) >= 262 and header_bytes[257:262] == b"ustar":
+        return "tar"
     if header_bytes.startswith(b"\x01\x01\x01\x01"):
         return "mmdf"
     if header_bytes.lstrip().startswith(b"BABYL OPTIONS:"):
@@ -1945,6 +1947,54 @@ def _iter_records_from_bytes(
 ) -> Iterator[MailRecord]:
     low = filename.lower()
     fmt = _sniff_stream_format(data[:4096])
+
+    if low.endswith((".gz", ".bz2", ".xz")) or fmt in ("gz", "bz2", "xz"):
+        try:
+            decomp = None
+            if fmt == "gz" or low.endswith(".gz"):
+                decomp = gzip.decompress(data)
+            elif fmt == "bz2" or low.endswith(".bz2"):
+                decomp = bz2.decompress(data)
+            elif fmt == "xz" or low.endswith(".xz"):
+                decomp = lzma.decompress(data)
+            if decomp:
+                inner_name = os.path.splitext(filename)[0] if any(low.endswith(x) for x in (".gz", ".bz2", ".xz")) else filename
+                yield from _iter_records_from_bytes(
+                    decomp,
+                    folder_parts,
+                    inner_name,
+                    include_deleted=include_deleted,
+                    ext_flags=ext_flags,
+                    native_msg_path=native_msg_path,
+                    parse_gmail=parse_gmail,
+                    file_mtime=file_mtime,
+                )
+                return
+        except Exception:
+            pass
+
+    if low.endswith((".zip", ".olm")) or fmt == "zip":
+        try:
+            yield from iter_zip_or_olm_records(
+                io.BytesIO(data),
+                folder_parts,
+                include_deleted=include_deleted,
+                parse_gmail=parse_gmail,
+            )
+            return
+        except Exception:
+            pass
+
+    if low.endswith((".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")) or fmt == "tar":
+        try:
+            yield from iter_tar_records(
+                io.BytesIO(data),
+                folder_parts,
+                include_deleted=include_deleted,
+            )
+            return
+        except Exception:
+            pass
 
     if low.endswith((".emlx", ".partial.emlx")) or fmt == "emlx":
         raw, flags = parse_emlx_bytes(data)

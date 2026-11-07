@@ -313,6 +313,7 @@ def add_attachments(
     tmpdir: str,
     body_parts: Optional[Set[int]] = None,
     skipped_oversized: Optional[List[Tuple[str, int]]] = None,
+    out_dir: Optional[str] = None,
 ) -> Tuple[int, bool]:
     """
     Save all non-body attachments and inline CID assets to temp files and attach to `mail`.
@@ -421,8 +422,26 @@ def add_attachments(
             count += 1
         except Exception as e:
             err_msg = str(e)
+            sz_mb = len(payload) / (1024 * 1024)
+            saved_disk_path = ""
+            target_save_dir = os.path.join(out_dir or tmpdir, "_unattached_files")
+            try:
+                os.makedirs(target_save_dir, exist_ok=True)
+                disk_fn = safe_fn
+                candidate_path = os.path.join(target_save_dir, disk_fn)
+                if os.path.exists(win_long_path(candidate_path)):
+                    bname, bext = os.path.splitext(disk_fn)
+                    c_idx = 1
+                    while os.path.exists(win_long_path(os.path.join(target_save_dir, f"{bname}_{c_idx}{bext}"))):
+                        c_idx += 1
+                    candidate_path = os.path.join(target_save_dir, f"{bname}_{c_idx}{bext}")
+                with open(win_long_path(candidate_path), "wb") as f_u:
+                    f_u.write(payload)
+                saved_disk_path = candidate_path
+            except Exception:
+                pass
+
             if "bigger than the server allows" in err_msg or "4096" in err_msg:
-                sz_mb = len(payload) / (1024 * 1024)
                 if skipped_oversized is not None:
                     skipped_oversized.append((safe_fn, len(payload)))
                 print(
@@ -430,8 +449,12 @@ def add_attachments(
                     f"       To lift this limit permanently in Outlook, run in PowerShell:\n"
                     f"       New-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Office\\16.0\\Outlook\\Preferences' -Name 'MaximumAttachmentSize' -Value 0 -PropertyType DWORD -Force"
                 )
+                if saved_disk_path:
+                    print(f"       [Preserved] Saved unattached file safely to disk: {saved_disk_path}")
             else:
                 print(f"\n[WARN] Attachment '{safe_fn}' failed: {e}")
+                if saved_disk_path:
+                    print(f"       [Preserved] Saved unattached file safely to disk: {saved_disk_path}")
         finally:
             shutil.rmtree(slot_dir, ignore_errors=True)
 
@@ -484,7 +507,7 @@ def handle_sender_info(mail_item, parsed_msg) -> None:
 
 
 @com_retry()
-def populate_mailitem(mail_item, parsed, msg_bytes: bytes, temp_dir: str, flags=None) -> None:
+def populate_mailitem(mail_item, parsed, msg_bytes: bytes, temp_dir: str, flags=None, out_dir: Optional[str] = None) -> None:
     """
     Populate an Outlook MailItem from a parsed email.message.Message and raw bytes,
     then call mail_item.Save().
@@ -515,7 +538,7 @@ def populate_mailitem(mail_item, parsed, msg_bytes: bytes, temp_dir: str, flags=
         mail_item.Body = "[S/MIME Encrypted or Opaque-Signed Message - See attached smime.p7m]"
 
     oversized: List[Tuple[str, int]] = []
-    att_count, _ = add_attachments(mail_item, parsed, temp_dir, body_parts=body_parts, skipped_oversized=oversized)
+    att_count, _ = add_attachments(mail_item, parsed, temp_dir, body_parts=body_parts, skipped_oversized=oversized, out_dir=out_dir)
 
     oversized_note = ""
     if oversized:
@@ -1087,6 +1110,7 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
     current_pst = None
 
     seen_keys: Set[str] = set()
+    seen_mid_signatures: Dict[str, Tuple[str, str, str]] = {}
     skipped_duplicate = 0
 
     if args.resume:
@@ -1119,6 +1143,8 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
                 msg = parser.parsebytes(b"Subject: (no subject)\r\n\r\n")
 
             mid = safe_get_header(msg, "Message-ID", "").strip()
+            subj_val = safe_get_header(msg, "Subject", "(no subject)").strip()
+            date_val = safe_get_header(msg, "Date", "").strip()
             is_dup = False
             dup_key = None
 
@@ -1126,13 +1152,31 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
                 sha = compute_sha256(raw) if (args.dedup in ("sha256", "auto") or not mid or args.resume) else ""
                 if args.dedup == "message-id":
                     dup_key = f"mid:{mid}" if mid else None
+                    if dup_key and dup_key in seen_keys:
+                        is_dup = True
                 elif args.dedup == "sha256":
                     dup_key = f"sha256:{sha}" if sha else None
+                    if dup_key and dup_key in seen_keys:
+                        is_dup = True
                 else:  # auto or resume
-                    dup_key = f"mid:{mid}" if mid else (f"sha256:{sha}" if sha else None)
-
-                if dup_key and dup_key in seen_keys:
-                    is_dup = True
+                    if args.resume and mid and f"mid:{mid}" in seen_keys:
+                        is_dup = True
+                        dup_key = f"mid:{mid}"
+                    elif args.resume and sha and f"sha256:{sha}" in seen_keys:
+                        is_dup = True
+                        dup_key = f"sha256:{sha}"
+                    elif args.dedup == "auto":
+                        if mid and mid in seen_mid_signatures:
+                            prev_sha, prev_subj, prev_date = seen_mid_signatures[mid]
+                            if sha == prev_sha or (prev_date and prev_date == date_val) or (prev_subj and prev_subj == subj_val):
+                                is_dup = True
+                                dup_key = f"mid:{mid}"
+                            # else: distinct message colliding on Message-ID, preserve it!
+                        elif sha and f"sha256:{sha}" in seen_keys:
+                            is_dup = True
+                            dup_key = f"sha256:{sha}"
+                        else:
+                            dup_key = f"mid:{mid}" if mid else (f"sha256:{sha}" if sha else None)
 
             if is_dup:
                 skipped += 1
@@ -1157,10 +1201,12 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
 
             if dup_key:
                 seen_keys.add(dup_key)
-                if mid and (args.dedup in ("sha256", "auto") or args.resume):
-                    sha = compute_sha256(raw) if not sha else sha
-                    seen_keys.add(f"mid:{mid}")
-                    seen_keys.add(f"sha256:{sha}")
+                if mid:
+                    seen_mid_signatures[mid] = (sha, subj_val, date_val)
+                    if args.dedup in ("sha256", "auto") or args.resume:
+                        sha = compute_sha256(raw) if not sha else sha
+                        seen_keys.add(f"mid:{mid}")
+                        seen_keys.add(f"sha256:{sha}")
 
             flags = extract_message_flags(msg)
             if (rec.is_deleted or flags[4]) and not args.include_deleted:
@@ -1234,7 +1280,7 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
                 if item is None:
                     item = dest.Items.Add(0)
                     try:
-                        populate_mailitem(item, msg, raw, tmpdir, flags=flags)
+                        populate_mailitem(item, msg, raw, tmpdir, flags=flags, out_dir=args.out_dir)
                     except Exception as pop_err:
                         # Zero-Data-Loss Fallback Preservation:
                         # If complex MIME body/header formatting fails in Outlook COM, preserve the
@@ -1306,6 +1352,18 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
                         sha256=compute_sha256(raw) if logger.audit_log_path else "",
                     ))
             except Exception as e:
+                # Zero-Data-Loss Emergency Fallback: preserve unimported message to disk
+                unimported_dir = os.path.join(args.out_dir, "_unimported_messages")
+                try:
+                    os.makedirs(unimported_dir, exist_ok=True)
+                    subj = sanitize_name(safe_get_header(msg, "Subject", "msg") or "msg", max_len=60)
+                    fb_eml = os.path.join(unimported_dir, f"msg_{processed:06d}_{subj}.eml")
+                    with open(win_long_path(fb_eml), "wb") as f_err:
+                        f_err.write(raw)
+                    logger.warn(f"Emergency preservation: saved unimported raw message to {fb_eml}")
+                except Exception:
+                    pass
+
                 logger.error(f"Failed to save item from {rec.source_name}", exc=e)
                 logger.record_failure(
                     source_file=rec.source_name,
