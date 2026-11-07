@@ -12,6 +12,9 @@ This directory documents the IETF RFCs, Microsoft Open Specifications, and de-fa
    - **RFC 2047** (MIME Part 3: Message Header Extensions for Non-ASCII Text / Encoded-Words)
    - **RFC 2183 / RFC 2231** (`Content-Disposition` Header Field & Parameter Value Continuations/Character Sets)
    - **RFC 2392** (`Content-ID` and `cid:` URLs for MHTML Inline Multipart/Related Assets)
+   - **RFC 3676** (`format=flowed` Plain Text Wrapping & DelSp Parameter)
+   - **RFC 5545** (iCalendar `text/calendar` Scheduling & Meeting Invitations)
+   - **RFC 3464 / RFC 6522** (Delivery Status Notifications & `multipart/report` Bounce Reports)
    - **RFC 6532** (Internationalized Email Headers / UTF-8)
    - **RFC 8551 / RFC 3156** (S/MIME v4.0 `application/pkcs7-mime`, `application/pkcs7-signature`, and PGP/MIME `application/pgp-signature`)
 
@@ -45,6 +48,8 @@ This directory documents the IETF RFCs, Microsoft Open Specifications, and de-fa
 | **RFC 3501 §5.1.3** | IMAP4rev1 Modified UTF-7 folder name encoding/decoding | [`decode_imap_utf7`](../../mail_formats.py#L130-L160), [`encode_imap_utf7`](../../mail_formats.py#L163-L193) | [`tests/test_rfc_compliance.py`](../../tests/test_rfc_compliance.py) |
 | **RFC 4155 & `mboxrd`** | `From <sender> <asctime>` framing & `>From ` body quoting | [`iter_mbox_stream`](../../mail_formats.py#L1561-L1620), [`format_mboxrd_entry`](../../mail2mbox.py#L101-L140) | [`tests/test_rfc_compliance.py`](../../tests/test_rfc_compliance.py), [`tests/test_exporters_and_cli.py`](../../tests/test_exporters_and_cli.py) |
 | **RFC 8551 / 3156** | S/MIME (`pkcs7-mime`, `pkcs7-signature`) & PGP (`pgp-signature`) | [`populate_mailitem`](../../mail2pst.py#L428-L436), [`add_attachments`](../../mail2pst.py#L291-L294) | [`tests/test_rfc_compliance.py`](../../tests/test_rfc_compliance.py) |
+| **RFC 5545** | iCalendar meeting invitations (`text/calendar`, `application/ics`) | [`add_attachments`](../../mail2pst.py#L291-L345) | [`tests/test_rfc_compliance.py`](../../tests/test_rfc_compliance.py) |
+| **RFC 3464 / 6522** | Delivery Status Notifications (`message/delivery-status`, `multipart/report`) | [`add_attachments`](../../mail2pst.py#L291-L345) | [`tests/test_rfc_compliance.py`](../../tests/test_rfc_compliance.py) |
 | **[MS-CFB] & [MS-OXMSG]** | OLE2 Compound File Binary & Outlook `.msg` streams/storages | [`_Ole2Reader`](../../mail_formats.py#L696-L846), [`parse_msg_bytes`](../../mail_formats.py#L887-L1055) | [`tests/test_mail_formats.py`](../../tests/test_mail_formats.py) |
 | **[MS-OXPROPS]** | MAPI Property Tags, naive UTC `VT_DATE`, sender/verb/icon props | [`populate_mailitem`](../../mail2pst.py#L412-L495), [`iter_pst_records`](../../mail_formats.py#L1246-L1466) | [`tests/test_exporters_and_cli.py`](../../tests/test_exporters_and_cli.py) |
 | **Maildir / Maildir++** | `cur/`, `new/`, `tmp/`, `:2,FRSPT` / `;2,FRSPT`, `.Folder.Sub` | [`parse_maildir_flags`](../../mail_formats.py#L557-L578), [`normalize_maildir_folder_parts`](../../mail_formats.py#L580-L600) | [`tests/test_mail_formats.py`](../../tests/test_mail_formats.py) |

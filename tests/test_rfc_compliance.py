@@ -238,6 +238,57 @@ class TestRFC2045MimeAndSMime(unittest.TestCase):
         self.assertEqual(cid_att.PropertyAccessor.props[mail2pst.PR_ATTACH_CONTENT_ID_W], "logo123")
         self.assertEqual(cid_att.PropertyAccessor.props[mail2pst.PR_ATTACH_FLAGS], 4)
 
+    def test_rfc5545_calendar_and_rfc3464_delivery_status(self):
+        """Verify RFC 5545 (text/calendar) and RFC 3464 (message/delivery-status) attachments."""
+        raw = (
+            b"From: organizer@example.com\r\n"
+            b"To: attendee@example.com\r\n"
+            b"Subject: Meeting Invite & Status Report\r\n"
+            b"MIME-Version: 1.0\r\n"
+            b"Content-Type: multipart/mixed; boundary=\"mix\"\r\n\r\n"
+            b"--mix\r\n"
+            b"Content-Type: text/plain; charset=\"utf-8\"\r\n\r\n"
+            b"Please join our planning session.\r\n"
+            b"--mix\r\n"
+            b"Content-Type: text/calendar; method=REQUEST; charset=\"utf-8\"\r\n\r\n"
+            b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nSUMMARY:Session\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+            b"--mix\r\n"
+            b"Content-Type: message/delivery-status\r\n\r\n"
+            b"Reporting-MTA: dns; mail.example.com\r\nStatus: 2.0.0\r\n"
+            b"--mix--\r\n"
+        )
+        msg = email.message_from_bytes(raw, policy=policy.default)
+        html, text, body_parts = mail2pst.pick_body(msg)
+        self.assertIn("planning session", text)
+
+        added = []
+
+        class MockPA:
+            def __init__(self):
+                self.props = {}
+            def SetProperty(self, k, v):
+                self.props[k] = v
+
+        class MockAtt:
+            def __init__(self, path, disp):
+                self.path = path
+                self.disp = disp
+                self.PropertyAccessor = MockPA()
+
+        class MockMail:
+            class Attachments:
+                @staticmethod
+                def Add(path, t, p, disp):
+                    att = MockAtt(path, disp)
+                    added.append(att)
+                    return att
+
+        count, _ = mail2pst.add_attachments(MockMail(), msg, self.tmpdir, body_parts=body_parts)
+        self.assertEqual(count, 2)
+        disp_names = [a.disp for a in added]
+        self.assertTrue(any(n.endswith(".ics") for n in disp_names))
+        self.assertTrue(any(n.endswith(".txt") for n in disp_names))
+
 
 if __name__ == "__main__":
     unittest.main()

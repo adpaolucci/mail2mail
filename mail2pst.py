@@ -303,7 +303,16 @@ def add_attachments(mail, msg, tmpdir: str, body_parts: Optional[Set[int]] = Non
                 fn = "signature.asc" if "pgp" in ctype else "smime.p7s"
 
         is_rfc822 = (ctype == "message/rfc822")
-        is_explicit_att = ("attachment" in disp) or (fn is not None) or is_rfc822 or is_opaque_smime
+        is_calendar = ctype in ("text/calendar", "application/ics")
+        is_delivery_report = ctype in ("message/delivery-status", "message/disposition-notification")
+        is_explicit_att = (
+            ("attachment" in disp)
+            or (fn is not None)
+            or is_rfc822
+            or is_opaque_smime
+            or is_calendar
+            or is_delivery_report
+        )
         is_inline_asset = (cid is not None) or (
             "inline" in disp and ctype not in ("text/plain", "text/html")
         )
@@ -312,13 +321,15 @@ def add_attachments(mail, msg, tmpdir: str, body_parts: Optional[Set[int]] = Non
             continue
 
         payload = None
-        if is_rfc822:
+        if is_rfc822 or is_delivery_report or part.get_content_maintype() == "message":
             try:
                 sub = part.get_payload()
-                if isinstance(sub, list) and sub:
-                    payload = sub[0].as_bytes()
-                else:
+                if isinstance(sub, list) and sub and hasattr(sub[0], "as_bytes"):
+                    payload = b"\r\n".join(s.as_bytes() for s in sub)
+                elif hasattr(part, "as_bytes"):
                     payload = part.as_bytes()
+                else:
+                    payload = part.get_payload(decode=True)
             except Exception:
                 payload = None
         else:
@@ -335,6 +346,10 @@ def add_attachments(mail, msg, tmpdir: str, body_parts: Optional[Set[int]] = Non
                 fn = "smime.p7m"
             elif is_rfc822:
                 fn = f"forwarded_message_{count + 1}.eml"
+            elif is_calendar:
+                fn = f"invite_{count + 1}.ics"
+            elif is_delivery_report:
+                fn = f"delivery_status_{count + 1}.txt"
             else:
                 ext = mimetypes.guess_extension(ctype or "") or ".bin"
                 fn = f"attachment_{count + 1}{ext}"
