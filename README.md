@@ -188,6 +188,12 @@ python mail2eml.py ^
 - `out` / `--out-dir` / `--out`: Destination directory for `.eml` files.
 - `--layout {folder,year,month,flat}`: Organize exported `.eml` files by source folder hierarchy, `YYYY`, `YYYY\MM`, or flat.
 - `--naming {subject,index}`: Name `.eml` files as `<subject>__<hash>.eml` (`subject`) or `000001.eml` (`index`).
+- `--since DATE` / `--after DATE`: Only export messages on or after this date (e.g. `2023-01-01`, `2023-06-15T09:00:00`, or RFC 2822).
+- `--until DATE` / `--before DATE`: Only export messages on or before this date (e.g. `2024-12-31`).
+- `--include-folder PATTERN`: Only export folders matching glob pattern(s) (can be specified multiple times; e.g. `--include-folder "*Inbox*" --include-folder "Projects/*"`).
+- `--exclude-folder PATTERN`: Exclude folders matching glob pattern(s) (e.g. `--exclude-folder "*Trash*" --exclude-folder "*Spam*"`).
+- `--state-file FILE`: Persistent SQLite (`.sqlite`, `.db`) or JSON Lines (`.jsonl`) state database for high-speed incremental / delta cutover syncs.
+- `--split-size SIZE`: Roll over directory when reaching human-friendly size limit (e.g. `20GB`, `500MB`, `15G`).
 - `--start-year YYYY` / `--end-year YYYY`: Filter messages by `Date` header year (inclusive).
 - `--max-per-dir N`: Roll over to `__part2`, `__part3`, etc. when a directory reaches `N` files (`0` = unlimited).
 - `--max-dir-bytes GB`: Roll over when a directory reaches `GB` gigabytes (`0` = unlimited).
@@ -223,6 +229,12 @@ python mail2mbox.py "D:\Migration\00_Source\ImapMail" "D:\Migration\03_Output_MB
 - `src` / `--src` / `--mbox`: Source mail directory, mailbox file, or archive.
 - `out` / `--out` / `--out-dir`: Output `.mbox` (`.mbox.gz` / `.mbox.bz2` / `.mbox.xz`) file or destination directory.
 - `--layout {folder,year,month,flat}`: Organize multi-mbox output by folder hierarchy, year, month, or flat (default: `folder`).
+- `--since DATE` / `--after DATE`: Only export messages on or after this date (e.g. `2023-01-01`, `2023-06-15T09:00:00`, or RFC 2822).
+- `--until DATE` / `--before DATE`: Only export messages on or before this date (e.g. `2024-12-31`).
+- `--include-folder PATTERN`: Only export folders matching glob pattern(s) (can be specified multiple times; e.g. `--include-folder "*Inbox*" --include-folder "Projects/*"`).
+- `--exclude-folder PATTERN`: Exclude folders matching glob pattern(s) (e.g. `--exclude-folder "*Trash*" --exclude-folder "*Spam*"`).
+- `--state-file FILE`: Persistent SQLite (`.sqlite`, `.db`) or JSON Lines (`.jsonl`) state database for high-speed incremental / delta cutover syncs.
+- `--split-size SIZE` / `--max-mbox-size SIZE`: Rotate to `__part2.mbox` when an mbox exceeds human-friendly size limit (e.g. `4GB`, `500MB`, `10G`).
 - `--max-mbox-gb GB`: Rotate to `__part2.mbox` when an mbox exceeds `GB` gigabytes (`0` = unlimited).
 - `--start-year YYYY` / `--end-year YYYY`: Filter messages by `Date` header year (inclusive).
 - `--include-deleted`: Include messages marked as deleted/expunged.
@@ -278,7 +290,13 @@ python mail2pst.py ^
 - `--base-name NAME`: Base filename prefix when using `--out-dir` (default: `emails`).
 - `--split-by year`: Create one PST per message year (`<base>_<YYYY>.pst`, rolling over to `<base>_<YYYY>_part2.pst` if exceeding `--max-pst-gb`).
 - `--splits N`: Divide total byte volume across `N` sequential PST files (`<base>.pst`, `<base>_part2.pst`, …).
+- `--split-pst SIZE` / `--max-pst-size SIZE`: Maximum size per PST in human units (e.g. `15GB`, `20G`, `500MB`) before rotating to the next part.
 - `--max-pst-gb GB`: Maximum size in GB per PST before rotating to the next part (default: `15.0`).
+- `--since DATE` / `--after DATE`: Only export messages on or after this date (e.g. `2023-01-01`, `2023-06-15T09:00:00`, or RFC 2822).
+- `--until DATE` / `--before DATE`: Only export messages on or before this date (e.g. `2024-12-31`).
+- `--include-folder PATTERN`: Only export folders matching glob pattern(s) (can be specified multiple times; e.g. `--include-folder "*Inbox*" --include-folder "Projects/*"`).
+- `--exclude-folder PATTERN`: Exclude folders matching glob pattern(s) (e.g. `--exclude-folder "*Trash*" --exclude-folder "*Spam*"`).
+- `--state-file FILE`: Persistent SQLite (`.sqlite`, `.db`) or JSON Lines (`.jsonl`) state database for high-speed incremental / delta cutover syncs.
 - `--pst-root NAME`: Top-level folder inside each PST (default: root `""` in single-PST mode, `"Imported (EML)"` in `--out-dir` mode).
 - `--flatten`: Place all messages directly inside `--pst-root` without recreating source subfolders.
 - `--start-year YYYY` / `--end-year YYYY`: Filter messages by `Date` header year (inclusive).
@@ -333,6 +351,43 @@ python mail2mail.py pst "D:\Migration\00_Source\Takeout_Parts" "D:\Migration\01_
 Large migrations (hundreds of gigabytes) can be resumed after system reboots or power interruptions without duplicating already-imported records. `--resume` reads existing `SUCCESS` entries from the audit manifest and skips them on the next run:
 ```cmd
 python mail2mail.py pst "D:\Migration\00_Source\LargeMailbox" "D:\Migration\01_Output_PST\Mailbox.pst" --audit-log "D:\Migration\04_Audit_Logs\audit.csv" --resume
+```
+
+### 6) Incremental Cutover & Delta Sync (`--state-file <path.sqlite | path.jsonl>`)
+In production enterprise cutovers, an initial bulk migration is performed while users remain on the old mail server. During the final cutover weekend, you run an **incremental delta sync** that fast-skips all previously migrated messages and imports only newly arrived emails:
+```cmd
+:: Pass 1: Bulk historical migration (builds state database)
+python mail2mail.py pst "D:\Migration\00_Source\LiveMailbox" "D:\Migration\01_Output_PST\Mailbox.pst" --state-file "D:\Migration\04_Audit_Logs\migration_state.sqlite"
+
+:: Pass 2: Final cutover delta sync (processes only messages received since Pass 1)
+python mail2mail.py pst "D:\Migration\00_Source\LiveMailbox" "D:\Migration\01_Output_PST\Mailbox.pst" --state-file "D:\Migration\04_Audit_Logs\migration_state.sqlite"
+```
+The state cache engine indexes both `Message-ID` headers and byte-accurate SHA-256 hashes using a high-concurrency SQLite WAL database or line-delimited JSONL stream, providing $O(1)$ lookup speed across millions of records.
+
+### 7) Granular Date Range & Folder Filtering (`--since`, `--until`, `--include-folder`, `--exclude-folder`)
+Selectively migrate date intervals or folder subtrees with timezone-aware ISO / RFC 2822 timestamps and case-insensitive glob patterns:
+```cmd
+:: Migrate only calendar year 2024, excluding Trash and Spam folders
+python mail2mail.py pst "D:\Migration\00_Source\ImapMail" "D:\Migration\01_Output_PST\Mail2024.pst" ^
+  --since "2024-01-01" ^
+  --until "2024-12-31" ^
+  --exclude-folder "*Trash*" ^
+  --exclude-folder "*Spam*"
+
+:: Target only specific department or project archives
+python mail2mail.py eml "D:\Migration\00_Source\CompanyArchive.olm" "D:\Migration\02_Output_EML" ^
+  --include-folder "Projects/*" ^
+  --include-folder "*Finance*"
+```
+
+### 8) Human-Friendly Capacity & Size Splitting (`--split-pst`, `--split-size`)
+Specify capacity thresholds using intuitive size units (`GB`, `MB`, `G`, `M`) instead of raw byte counts:
+```cmd
+:: Rotate to part2, part3 when PST reaches 15 GB
+python mail2mail.py pst "D:\Migration\00_Source\LargeArchive" --out-dir "D:\Migration\01_Output_PST" --split-pst 15GB
+
+:: Rotate mbox files at 4 GB
+python mail2mail.py mbox "D:\Migration\02_Output_EML" "D:\Migration\03_Output_MBOX\MboxTree" --split-size 4G
 ```
 
 ---

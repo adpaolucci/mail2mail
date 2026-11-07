@@ -72,6 +72,7 @@ from mail_formats import (
     win_long_path,
 )
 from mail_audit import AuditLogger, AuditRecord, compute_sha256, perform_dry_run
+from mail_filter import DateFilter, FolderFilter, MigrationState, parse_size_bytes
 
 parse_message_flags = extract_message_flags
 sanitize_folder_name = sanitize_name
@@ -989,9 +990,14 @@ def build_arg_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
     ap.add_argument("--base-name", default="emails", help="Base name for PST files when using --out-dir (default: emails)")
     ap.add_argument("--split-by", choices=["year"], default=None, help="Split by mail year (one PST per year)")
     ap.add_argument("--splits", type=int, default=None, help="Even-split into N PSTs by total bytes")
+    ap.add_argument("--split-pst", "--max-pst-size", dest="split_pst", help="Max size per PST before rotating (e.g. 20GB, 15G, 500MB)")
     ap.add_argument("--max-pst-gb", type=float, default=15.0, help="Max ~GB per PST before rotating part2/part3 (default: 15.0, 0=unlimited)")
     ap.add_argument("--pst-root", default=None, help="Top folder name inside each PST (default: root for single-PST, 'Imported (EML)' for --out-dir)")
     ap.add_argument("--flatten", action="store_true", help="Do not replicate source subfolder structure inside PST")
+    ap.add_argument("--since", "--after", dest="since", help="Filter messages on or after date/time (e.g. 2023-01-01 or 2023-01-01T00:00:00)")
+    ap.add_argument("--until", "--before", dest="until", help="Filter messages on or before date/time (e.g. 2023-12-31 or 2023-12-31T23:59:59)")
+    ap.add_argument("--include-folder", dest="include_folders", action="append", help="Include only folders matching name/glob (repeatable)")
+    ap.add_argument("--exclude-folder", dest="exclude_folders", action="append", help="Exclude folders matching name/glob (repeatable)")
     ap.add_argument("--start-year", type=int, default=None, help="Import messages from this year (inclusive)")
     ap.add_argument("--end-year", type=int, default=None, help="Import messages up to this year (inclusive)")
     ap.add_argument("--overwrite-pst", action="store_true", help="Overwrite existing target PST files if present")
@@ -1012,6 +1018,11 @@ def build_arg_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
         const=True,
         default=None,
         help="Resume an interrupted migration by skipping messages already marked SUCCESS in the audit log or specified manifest file",
+    )
+    ap.add_argument(
+        "--state-file",
+        dest="state_file",
+        help="Path to persistent SQLite or JSONL state database for incremental / delta cutover sync across runs",
     )
     ap.add_argument(
         "--no-gmail-labels",
@@ -1076,6 +1087,14 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
     os.makedirs(out_dir, exist_ok=True)
     total_bytes = estimate_source_bytes(src)
 
+    max_pst_gb = args.max_pst_gb
+    if args.split_pst:
+        max_pst_gb = parse_size_bytes(args.split_pst) / (1024**3)
+
+    date_filter = DateFilter(since=args.since, until=args.until, start_year=args.start_year, end_year=args.end_year)
+    folder_filter = FolderFilter(include_patterns=args.include_folders, exclude_patterns=args.exclude_folders)
+    state = MigrationState(args.state_file) if args.state_file else None
+
     logger = AuditLogger(
         audit_log_path=args.audit_log,
         error_log_path=args.error_log,
@@ -1090,7 +1109,7 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
         ns=ns,
         out_dir=out_dir,
         base_name=base_name,
-        max_gb=args.max_pst_gb,
+        max_gb=max_pst_gb,
         splits=args.splits,
         split_by_year=(args.split_by == "year"),
         overwrite=args.overwrite_pst,
@@ -1105,6 +1124,8 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
     skipped = 0
     skipped_date = 0
     skipped_deleted = 0
+    skipped_folder = 0
+    skipped_state = 0
     done_bytes = 0
     tmpdir = tempfile.mkdtemp(prefix="mail2pst_")
     current_pst = None
@@ -1137,6 +1158,28 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
             done_bytes += sz
             folder_display = os.sep.join(rec.folder_parts) if rec.folder_parts else "Root"
 
+            # 1. Folder Inclusion / Exclusion Rule Filtering
+            if not folder_filter.matches(rec.folder_parts):
+                skipped += 1
+                skipped_folder += 1
+                if logger and logger.audit_log_path:
+                    logger.record_message(AuditRecord(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        status="SKIPPED_FOLDER",
+                        source_file=rec.source_name,
+                        source_folder=folder_display,
+                        target_location="",
+                        message_id="",
+                        subject="",
+                        date="",
+                        sender="",
+                        recipients="",
+                        size_bytes=sz,
+                        attachment_count=0,
+                        notes=f"Filtered by folder rule ({folder_filter.describe()})",
+                    ))
+                continue
+
             try:
                 msg = parser.parsebytes(raw)
             except Exception:
@@ -1145,8 +1188,34 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
             mid = safe_get_header(msg, "Message-ID", "").strip()
             subj_val = safe_get_header(msg, "Subject", "(no subject)").strip()
             date_val = safe_get_header(msg, "Date", "").strip()
+
+            # 2. Incremental Migration State Cache Check
+            if state and state.is_active:
+                sha_check = compute_sha256(raw) if not mid else ""
+                if state.is_completed(mid, sha_check):
+                    skipped += 1
+                    skipped_state += 1
+                    if logger and logger.audit_log_path:
+                        logger.record_message(AuditRecord(
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                            status="SKIPPED_STATE_CACHE",
+                            source_file=rec.source_name,
+                            source_folder=folder_display,
+                            target_location="",
+                            message_id=mid,
+                            subject=subj_val,
+                            date=date_val,
+                            sender=safe_get_header(msg, "From", ""),
+                            recipients="; ".join(safe_get_all_headers(msg, "To")),
+                            size_bytes=sz,
+                            attachment_count=0,
+                            notes="Previously migrated in delta state cache",
+                        ))
+                    continue
+
             is_dup = False
             dup_key = None
+            sha = ""
 
             if args.dedup != "none" or args.resume:
                 sha = compute_sha256(raw) if (args.dedup in ("sha256", "auto") or not mid or args.resume) else ""
@@ -1230,9 +1299,11 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
                     ))
                 continue
 
-            year, _ = pick_year_month(msg, fallback_timestamp=getattr(rec, "file_mtime", None))
+            # 3. Granular Date Range Filtering
+            msg_dt = extract_best_datetime(msg, fallback_timestamp=getattr(rec, "file_mtime", None))
+            year, _ = (msg_dt.year, msg_dt.month) if msg_dt else pick_year_month(msg, fallback_timestamp=getattr(rec, "file_mtime", None))
 
-            if (args.start_year and year < args.start_year) or (args.end_year and year > args.end_year):
+            if not date_filter.matches(msg_dt, fallback_year=year):
                 skipped += 1
                 skipped_date += 1
                 if logger and logger.audit_log_path:
@@ -1249,7 +1320,7 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
                         recipients="; ".join(safe_get_all_headers(msg, "To")),
                         size_bytes=sz,
                         attachment_count=0,
-                        notes=f"Filtered by date range ({args.start_year}-{args.end_year})",
+                        notes=f"Filtered by date range ({date_filter.describe()})",
                     ))
                 continue
 
@@ -1351,6 +1422,14 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
                         attachment_count=0,
                         sha256=compute_sha256(raw) if logger.audit_log_path else "",
                     ))
+
+                if state and state.is_active:
+                    state.record_success(
+                        mid=mid,
+                        sha256=sha if sha else compute_sha256(raw),
+                        source_file=rec.source_name,
+                        folder=folder_display,
+                    )
             except Exception as e:
                 # Zero-Data-Loss Emergency Fallback: preserve unimported message to disk
                 unimported_dir = os.path.join(args.out_dir, "_unimported_messages")
@@ -1425,15 +1504,19 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
             exported=imported,
             skipped_date=skipped_date,
             skipped_deleted=skipped_deleted,
-            failed=skipped - skipped_date - skipped_deleted - skipped_duplicate,
+            failed=skipped - skipped_date - skipped_deleted - skipped_duplicate - skipped_folder - skipped_state,
             total_bytes=done_bytes,
             extra_details={"Target PST Location": single_pst_path or out_dir},
             skipped_duplicate=skipped_duplicate,
+            skipped_folder=skipped_folder,
+            skipped_state=skipped_state,
         )
 
     finally:
         logger.close()
         shutil.rmtree(tmpdir, ignore_errors=True)
+        if state:
+            state.close()
         try:
             router.close_all()
         except Exception as e:

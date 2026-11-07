@@ -5,8 +5,13 @@ Automatically provides lightweight COM stubs if pywin32 is not installed in the 
 
 from __future__ import annotations
 
+import os
 import sys
 import types
+
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if sys.path[0] != repo_root:
+    sys.path.insert(0, repo_root)
 
 
 def ensure_pywin32_stubs() -> None:

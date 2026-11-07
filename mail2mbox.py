@@ -42,6 +42,7 @@ from email.utils import getaddresses, parsedate_to_datetime
 from typing import Dict, IO, List, Optional, Tuple
 
 from mail_formats import (
+    extract_best_datetime,
     extract_message_flags,
     iter_mail_records,
     normalize_eml_bytes_with_flags,
@@ -52,6 +53,7 @@ from mail_formats import (
     win_long_path,
 )
 from mail_audit import AuditLogger, AuditRecord, compute_sha256, perform_dry_run
+from mail_filter import DateFilter, FolderFilter, MigrationState, parse_size_bytes
 
 MBOXRD_BODY_FROM_RE = re.compile(rb"^(>*From )", re.MULTILINE)
 MBOX_FILE_EXTS = (".mbox", ".mbx", ".mbox.gz", ".mbox.bz2", ".mbox.xz")
@@ -320,9 +322,14 @@ def export_to_mbox(
     layout: str = "folder",
     start_year: Optional[int] = None,
     end_year: Optional[int] = None,
-    include_deleted: bool = False,
+    since: Optional[Any] = None,
+    until: Optional[Any] = None,
+    include_folders: Optional[List[str]] = None,
+    exclude_folders: Optional[List[str]] = None,
+    state_file: Optional[str] = None,
     max_mbox_gb: float = 0.0,
     overwrite: bool = True,
+    include_deleted: bool = False,
     logger: Optional[AuditLogger] = None,
     dedup: str = "none",
     resume: Optional[Any] = None,
@@ -335,11 +342,17 @@ def export_to_mbox(
     """
     parser = BytesParser(policy=policy.default)
     pool = MboxWriterPool(max_gb=max_mbox_gb, overwrite=overwrite)
+    date_filter = DateFilter(since=since, until=until, start_year=start_year, end_year=end_year)
+    folder_filter = FolderFilter(include_patterns=include_folders, exclude_patterns=exclude_folders)
+    state = MigrationState(state_file) if state_file else None
+
     written = 0
     skipped = 0
     skipped_date = 0
     skipped_deleted = 0
     skipped_duplicate = 0
+    skipped_folder = 0
+    skipped_state = 0
     failed = 0
     total_bytes = 0
     started = time.time()
@@ -368,6 +381,28 @@ def export_to_mbox(
                 failed += 1
                 continue
 
+            # 1. Folder Inclusion / Exclusion Rule Filtering
+            if not folder_filter.matches(rec.folder_parts):
+                skipped += 1
+                skipped_folder += 1
+                if logger and logger.audit_log_path:
+                    logger.record_message(AuditRecord(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        status="SKIPPED_FOLDER",
+                        source_file=rec.source_name,
+                        source_folder=folder_display,
+                        target_location="",
+                        message_id="",
+                        subject="",
+                        date="",
+                        sender="",
+                        recipients="",
+                        size_bytes=len(raw_bytes),
+                        attachment_count=0,
+                        notes=f"Filtered by folder rule ({folder_filter.describe()})",
+                    ))
+                continue
+
             try:
                 msg = parser.parsebytes(raw_bytes)
             except Exception:
@@ -376,8 +411,34 @@ def export_to_mbox(
             mid = safe_get_header(msg, "Message-ID", "").strip()
             subj_val = safe_get_header(msg, "Subject", "(no subject)").strip()
             date_val = safe_get_header(msg, "Date", "").strip()
+
+            # 2. Incremental Migration State Cache Check
+            if state and state.is_active:
+                sha_check = compute_sha256(raw_bytes) if not mid else ""
+                if state.is_completed(mid, sha_check):
+                    skipped += 1
+                    skipped_state += 1
+                    if logger and logger.audit_log_path:
+                        logger.record_message(AuditRecord(
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                            status="SKIPPED_STATE_CACHE",
+                            source_file=rec.source_name,
+                            source_folder=folder_display,
+                            target_location="",
+                            message_id=mid,
+                            subject=subj_val,
+                            date=date_val,
+                            sender=safe_get_header(msg, "From", ""),
+                            recipients="; ".join(safe_get_all_headers(msg, "To")),
+                            size_bytes=len(raw_bytes),
+                            attachment_count=0,
+                            notes="Previously migrated in delta state cache",
+                        ))
+                    continue
+
             is_dup = False
             dup_key = None
+            sha = ""
 
             if dedup != "none" or resume:
                 sha = compute_sha256(raw_bytes) if (dedup in ("sha256", "auto") or not mid or resume) else ""
@@ -467,8 +528,10 @@ def export_to_mbox(
                     ))
                 continue
 
-            year, month = pick_year_month(msg)
-            if (start_year and year < start_year) or (end_year and year > end_year):
+            # 3. Granular Date Range Filtering
+            msg_dt = extract_best_datetime(msg, fallback_timestamp=rec.file_mtime)
+            year, month = (msg_dt.year, msg_dt.month) if msg_dt else pick_year_month(msg)
+            if not date_filter.matches(msg_dt, fallback_year=year):
                 skipped += 1
                 skipped_date += 1
                 if logger and logger.audit_log_path:
@@ -485,7 +548,7 @@ def export_to_mbox(
                         recipients="; ".join(safe_get_all_headers(msg, "To")),
                         size_bytes=len(raw_bytes),
                         attachment_count=0,
-                        notes=f"Filtered by date range ({start_year}-{end_year})",
+                        notes=f"Filtered by date range ({date_filter.describe()})",
                     ))
                 continue
 
@@ -522,6 +585,14 @@ def export_to_mbox(
                         attachment_count=0,
                         sha256=compute_sha256(raw_bytes) if logger.audit_log_path else "",
                     ))
+
+                if state and state.is_active:
+                    state.record_success(
+                        mid=mid,
+                        sha256=sha if sha else compute_sha256(raw_bytes),
+                        source_file=rec.source_name,
+                        folder=folder_display,
+                    )
             except Exception as e:
                 skipped += 1
                 failed += 1
@@ -558,6 +629,8 @@ def export_to_mbox(
                     print(f"\rExported {written:,} messages (skipped {skipped:,})...", end="", flush=True)
     finally:
         pool.close_all()
+        if state:
+            state.close()
 
     if written >= 250 and (not logger or not logger.quiet):
         print()
@@ -574,6 +647,8 @@ def export_to_mbox(
             failed=failed,
             total_bytes=total_bytes,
             skipped_duplicate=skipped_duplicate,
+            skipped_folder=skipped_folder,
+            skipped_state=skipped_state,
         )
 
     return written, skipped
@@ -599,6 +674,11 @@ def build_arg_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
         default="folder",
         help="MBOX directory organization when exporting to a folder (default: folder)",
     )
+    ap.add_argument("--since", "--after", dest="since", help="Filter messages on or after date/time (e.g. 2023-01-01 or 2023-01-01T00:00:00)")
+    ap.add_argument("--until", "--before", dest="until", help="Filter messages on or before date/time (e.g. 2023-12-31 or 2023-12-31T23:59:59)")
+    ap.add_argument("--include-folder", dest="include_folders", action="append", help="Include only folders matching name/glob (repeatable)")
+    ap.add_argument("--exclude-folder", dest="exclude_folders", action="append", help="Exclude folders matching name/glob (repeatable)")
+    ap.add_argument("--split-size", "--max-mbox-size", dest="split_size", help="Max mbox size (e.g. 20GB, 500MB) before rotating to __part2.mbox")
     ap.add_argument("--max-mbox-gb", type=float, default=0.0, help="Rotate to __part2.mbox when an mbox exceeds ~GB (0=unlimited)")
     ap.add_argument("--start-year", type=int, default=None, help="Only export messages from this year (inclusive)")
     ap.add_argument("--end-year", type=int, default=None, help="Only export messages up to this year (inclusive)")
@@ -618,6 +698,11 @@ def build_arg_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
         const=True,
         default=None,
         help="Resume an interrupted migration by skipping messages already marked SUCCESS in the audit log or specified manifest file",
+    )
+    ap.add_argument(
+        "--state-file",
+        dest="state_file",
+        help="Path to persistent SQLite or JSONL state database for incremental / delta cutover sync across runs",
     )
     ap.add_argument(
         "--no-gmail-labels",
@@ -667,6 +752,10 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
     if not single_file_mode:
         os.makedirs(win_long_path(target), exist_ok=True)
 
+    max_mbox_gb = args.max_mbox_gb
+    if args.split_size:
+        max_mbox_gb = parse_size_bytes(args.split_size) / (1024**3)
+
     logger = AuditLogger(
         audit_log_path=args.audit_log,
         error_log_path=args.error_log,
@@ -686,8 +775,13 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
             layout=args.layout,
             start_year=args.start_year,
             end_year=args.end_year,
+            since=args.since,
+            until=args.until,
+            include_folders=args.include_folders,
+            exclude_folders=args.exclude_folders,
+            state_file=args.state_file,
             include_deleted=args.include_deleted,
-            max_mbox_gb=args.max_mbox_gb,
+            max_mbox_gb=max_mbox_gb,
             overwrite=(not args.append),
             logger=logger,
             dedup=args.dedup,

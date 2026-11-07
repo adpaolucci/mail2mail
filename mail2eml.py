@@ -37,6 +37,7 @@ from mail_formats import (
     WINDOWS_RESERVED_NAMES,
     decode_imap_utf7,
     decode_modified_utf7,
+    extract_best_datetime,
     extract_message_flags,
     iter_mail_records,
     normalize_eml_bytes_with_flags,
@@ -48,6 +49,7 @@ from mail_formats import (
     win_long_path,
 )
 from mail_audit import AuditLogger, AuditRecord, compute_sha256, perform_dry_run
+from mail_filter import DateFilter, FolderFilter, MigrationState, parse_size_bytes
 
 _HEADER_PARSER = email.parser.BytesHeaderParser()
 
@@ -98,6 +100,11 @@ def export_to_eml(
     naming: str = "subject",
     start_year: Optional[int] = None,
     end_year: Optional[int] = None,
+    since: Optional[Any] = None,
+    until: Optional[Any] = None,
+    include_folders: Optional[List[str]] = None,
+    exclude_folders: Optional[List[str]] = None,
+    state_file: Optional[str] = None,
     max_per_dir: int = 0,
     max_dir_gb: float = 0.0,
     include_deleted: bool = False,
@@ -115,6 +122,10 @@ def export_to_eml(
     ensure_dir(out_root)
     max_dir_bytes = int(max_dir_gb * (1024**3)) if max_dir_gb and max_dir_gb > 0 else 0
 
+    date_filter = DateFilter(since=since, until=until, start_year=start_year, end_year=end_year)
+    folder_filter = FolderFilter(include_patterns=include_folders, exclude_patterns=exclude_folders)
+    state = MigrationState(state_file) if state_file else None
+
     dir_counts: Dict[str, int] = {}
     dir_bytes: Dict[str, int] = {}
     active_part: Dict[str, int] = {}
@@ -123,6 +134,8 @@ def export_to_eml(
     seen_keys: Set[str] = set()
     seen_mid_signatures: Dict[str, Tuple[str, str, str]] = {}
     skipped_duplicate = 0
+    skipped_folder = 0
+    skipped_state = 0
 
     if resume:
         resume_source = resume if isinstance(resume, str) and os.path.isfile(resume) else (logger.audit_log_path if logger else None)
@@ -143,222 +156,286 @@ def export_to_eml(
     started = time.time()
     i = 0
 
-    for i, rec in enumerate(iter_mail_records(src_path, include_deleted=True, parse_gmail=parse_gmail), 1):
-        raw = rec.raw_bytes
-        msg = _HEADER_PARSER.parsebytes(raw)
-        _, _, _, _, is_expunged = extract_message_flags(msg)
-        folder_display = os.sep.join(rec.folder_parts) if rec.folder_parts else "Root"
+    try:
+        for i, rec in enumerate(iter_mail_records(src_path, include_deleted=True, parse_gmail=parse_gmail), 1):
+            raw = rec.raw_bytes
+            folder_display = os.sep.join(rec.folder_parts) if rec.folder_parts else "Root"
 
-        mid = safe_get_header(msg, "Message-ID", "").strip()
-        subj_val = safe_get_header(msg, "Subject", "(no subject)").strip()
-        date_val = safe_get_header(msg, "Date", "").strip()
-        is_dup = False
-        dup_key = None
+            # 1. Folder Inclusion / Exclusion Rule Filtering
+            if not folder_filter.matches(rec.folder_parts):
+                skipped += 1
+                skipped_folder += 1
+                if logger and logger.audit_log_path:
+                    logger.record_message(AuditRecord(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        status="SKIPPED_FOLDER",
+                        source_file=rec.source_name,
+                        source_folder=folder_display,
+                        target_location="",
+                        message_id="",
+                        subject="",
+                        date="",
+                        sender="",
+                        recipients="",
+                        size_bytes=len(raw),
+                        attachment_count=0,
+                        notes=f"Filtered by folder rule ({folder_filter.describe()})",
+                    ))
+                continue
 
-        if dedup != "none" or resume:
-            sha = compute_sha256(raw) if (dedup in ("sha256", "auto") or not mid or resume) else ""
-            if dedup == "message-id":
-                dup_key = f"mid:{mid}" if mid else None
-                if dup_key and dup_key in seen_keys:
-                    is_dup = True
-            elif dedup == "sha256":
-                dup_key = f"sha256:{sha}" if sha else None
-                if dup_key and dup_key in seen_keys:
-                    is_dup = True
-            else:  # auto or resume
-                if resume and mid and f"mid:{mid}" in seen_keys:
-                    is_dup = True
-                    dup_key = f"mid:{mid}"
-                elif resume and sha and f"sha256:{sha}" in seen_keys:
-                    is_dup = True
-                    dup_key = f"sha256:{sha}"
-                elif dedup == "auto":
-                    if mid and mid in seen_mid_signatures:
-                        prev_sha, prev_subj, prev_date = seen_mid_signatures[mid]
-                        if sha == prev_sha or (prev_date and prev_date == date_val) or (prev_subj and prev_subj == subj_val):
-                            is_dup = True
-                            dup_key = f"mid:{mid}"
-                        # else: distinct message colliding on Message-ID, preserve it!
-                    elif sha and f"sha256:{sha}" in seen_keys:
+            msg = _HEADER_PARSER.parsebytes(raw)
+            _, _, _, _, is_expunged = extract_message_flags(msg)
+
+            mid = safe_get_header(msg, "Message-ID", "").strip()
+            subj_val = safe_get_header(msg, "Subject", "(no subject)").strip()
+            date_val = safe_get_header(msg, "Date", "").strip()
+
+            # 2. Incremental Migration State Cache Check
+            if state and state.is_active:
+                sha_check = compute_sha256(raw) if not mid else ""
+                if state.is_completed(mid, sha_check):
+                    skipped += 1
+                    skipped_state += 1
+                    if logger and logger.audit_log_path:
+                        logger.record_message(AuditRecord(
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                            status="SKIPPED_STATE_CACHE",
+                            source_file=rec.source_name,
+                            source_folder=folder_display,
+                            target_location="",
+                            message_id=mid,
+                            subject=subj_val,
+                            date=date_val,
+                            sender=safe_get_header(msg, "From", ""),
+                            recipients="; ".join(safe_get_all_headers(msg, "To")),
+                            size_bytes=len(raw),
+                            attachment_count=0,
+                            notes="Previously migrated in delta state cache",
+                        ))
+                    continue
+
+            is_dup = False
+            dup_key = None
+            sha = ""
+
+            if dedup != "none" or resume:
+                sha = compute_sha256(raw) if (dedup in ("sha256", "auto") or not mid or resume) else ""
+                if dedup == "message-id":
+                    dup_key = f"mid:{mid}" if mid else None
+                    if dup_key and dup_key in seen_keys:
+                        is_dup = True
+                elif dedup == "sha256":
+                    dup_key = f"sha256:{sha}" if sha else None
+                    if dup_key and dup_key in seen_keys:
+                        is_dup = True
+                else:  # auto or resume
+                    if resume and mid and f"mid:{mid}" in seen_keys:
+                        is_dup = True
+                        dup_key = f"mid:{mid}"
+                    elif resume and sha and f"sha256:{sha}" in seen_keys:
                         is_dup = True
                         dup_key = f"sha256:{sha}"
-                    else:
-                        dup_key = f"mid:{mid}" if mid else (f"sha256:{sha}" if sha else None)
+                    elif dedup == "auto":
+                        if mid and mid in seen_mid_signatures:
+                            prev_sha, prev_subj, prev_date = seen_mid_signatures[mid]
+                            if sha == prev_sha or (prev_date and prev_date == date_val) or (prev_subj and prev_subj == subj_val):
+                                is_dup = True
+                                dup_key = f"mid:{mid}"
+                            # else: distinct message colliding on Message-ID, preserve it!
+                        elif sha and f"sha256:{sha}" in seen_keys:
+                            is_dup = True
+                            dup_key = f"sha256:{sha}"
+                        else:
+                            dup_key = f"mid:{mid}" if mid else (f"sha256:{sha}" if sha else None)
 
-        if is_dup:
-            skipped += 1
-            skipped_duplicate += 1
-            if logger and logger.audit_log_path:
-                logger.record_message(AuditRecord(
-                    timestamp=datetime.now(timezone.utc).isoformat(),
-                    status="SKIPPED_DUPLICATE",
-                    source_file=rec.source_name,
-                    source_folder=folder_display,
-                    target_location="",
-                    message_id=mid,
-                    subject=safe_get_header(msg, "Subject", "(no subject)"),
-                    date=safe_get_header(msg, "Date", ""),
-                    sender=safe_get_header(msg, "From", ""),
-                    recipients="; ".join(safe_get_all_headers(msg, "To")),
-                    size_bytes=len(raw),
-                    attachment_count=0,
-                    notes="Skipped duplicate message (dedup/resume)",
-                ))
-            continue
+            if is_dup:
+                skipped += 1
+                skipped_duplicate += 1
+                if logger and logger.audit_log_path:
+                    logger.record_message(AuditRecord(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        status="SKIPPED_DUPLICATE",
+                        source_file=rec.source_name,
+                        source_folder=folder_display,
+                        target_location="",
+                        message_id=mid,
+                        subject=safe_get_header(msg, "Subject", "(no subject)"),
+                        date=safe_get_header(msg, "Date", ""),
+                        sender=safe_get_header(msg, "From", ""),
+                        recipients="; ".join(safe_get_all_headers(msg, "To")),
+                        size_bytes=len(raw),
+                        attachment_count=0,
+                        notes="Skipped duplicate message (dedup/resume)",
+                    ))
+                continue
 
-        if dup_key:
-            seen_keys.add(dup_key)
-            if mid:
-                seen_mid_signatures[mid] = (sha, subj_val, date_val)
-                if dedup in ("sha256", "auto") or resume:
-                    sha = compute_sha256(raw) if not sha else sha
-                    seen_keys.add(f"mid:{mid}")
-                    seen_keys.add(f"sha256:{sha}")
+            if dup_key:
+                seen_keys.add(dup_key)
+                if mid:
+                    seen_mid_signatures[mid] = (sha, subj_val, date_val)
+                    if dedup in ("sha256", "auto") or resume:
+                        sha = compute_sha256(raw) if not sha else sha
+                        seen_keys.add(f"mid:{mid}")
+                        seen_keys.add(f"sha256:{sha}")
 
-        if not include_deleted and (rec.is_deleted or is_expunged):
-            skipped += 1
-            skipped_deleted += 1
-            if logger and logger.audit_log_path:
-                logger.record_message(AuditRecord(
-                    timestamp=datetime.now(timezone.utc).isoformat(),
-                    status="SKIPPED_DELETED",
-                    source_file=rec.source_name,
-                    source_folder=folder_display,
-                    target_location="",
-                    message_id=safe_get_header(msg, "Message-ID", ""),
-                    subject=safe_get_header(msg, "Subject", "(no subject)"),
-                    date=safe_get_header(msg, "Date", ""),
-                    sender=safe_get_header(msg, "From", ""),
-                    recipients="; ".join(safe_get_all_headers(msg, "To")),
-                    size_bytes=len(raw),
-                    attachment_count=0,
-                    notes="Message marked deleted/expunged",
-                ))
-            continue
+            if not include_deleted and (rec.is_deleted or is_expunged):
+                skipped += 1
+                skipped_deleted += 1
+                if logger and logger.audit_log_path:
+                    logger.record_message(AuditRecord(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        status="SKIPPED_DELETED",
+                        source_file=rec.source_name,
+                        source_folder=folder_display,
+                        target_location="",
+                        message_id=safe_get_header(msg, "Message-ID", ""),
+                        subject=safe_get_header(msg, "Subject", "(no subject)"),
+                        date=safe_get_header(msg, "Date", ""),
+                        sender=safe_get_header(msg, "From", ""),
+                        recipients="; ".join(safe_get_all_headers(msg, "To")),
+                        size_bytes=len(raw),
+                        attachment_count=0,
+                        notes="Message marked deleted/expunged",
+                    ))
+                continue
 
-        year, month = pick_year_month(msg)
-        if (start_year and year < start_year) or (end_year and year > end_year):
-            skipped += 1
-            skipped_date += 1
-            if logger and logger.audit_log_path:
-                logger.record_message(AuditRecord(
-                    timestamp=datetime.now(timezone.utc).isoformat(),
-                    status="SKIPPED_DATE",
-                    source_file=rec.source_name,
-                    source_folder=folder_display,
-                    target_location="",
-                    message_id=safe_get_header(msg, "Message-ID", ""),
-                    subject=safe_get_header(msg, "Subject", "(no subject)"),
-                    date=safe_get_header(msg, "Date", ""),
-                    sender=safe_get_header(msg, "From", ""),
-                    recipients="; ".join(safe_get_all_headers(msg, "To")),
-                    size_bytes=len(raw),
-                    attachment_count=0,
-                    notes=f"Filtered by date range ({start_year}-{end_year})",
-                ))
-            continue
+            # 3. Granular Date Range Filtering
+            msg_dt = extract_best_datetime(msg, fallback_timestamp=rec.file_mtime)
+            year, month = (msg_dt.year, msg_dt.month) if msg_dt else pick_year_month(msg)
+            if not date_filter.matches(msg_dt, fallback_year=year):
+                skipped += 1
+                skipped_date += 1
+                if logger and logger.audit_log_path:
+                    logger.record_message(AuditRecord(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        status="SKIPPED_DATE",
+                        source_file=rec.source_name,
+                        source_folder=folder_display,
+                        target_location="",
+                        message_id=safe_get_header(msg, "Message-ID", ""),
+                        subject=safe_get_header(msg, "Subject", "(no subject)"),
+                        date=safe_get_header(msg, "Date", ""),
+                        sender=safe_get_header(msg, "From", ""),
+                        recipients="; ".join(safe_get_all_headers(msg, "To")),
+                        size_bytes=len(raw),
+                        attachment_count=0,
+                        notes=f"Filtered by date range ({date_filter.describe()})",
+                    ))
+                continue
 
-        if layout == "flat":
-            base_dir = out_root
-        elif layout == "year":
-            base_dir = os.path.join(out_root, f"{year:04d}")
-        elif layout == "month":
-            base_dir = os.path.join(out_root, f"{year:04d}", f"{month:02d}")
-        else:  # 'folder'
-            safe_parts = [sanitize_name(p, default="Unnamed_Folder", max_len=100) for p in (rec.folder_parts or ["Inbox"])]
-            base_dir = os.path.join(out_root, *safe_parts)
+            if layout == "flat":
+                base_dir = out_root
+            elif layout == "year":
+                base_dir = os.path.join(out_root, f"{year:04d}")
+            elif layout == "month":
+                base_dir = os.path.join(out_root, f"{year:04d}", f"{month:02d}")
+            else:  # 'folder'
+                safe_parts = [sanitize_name(p, default="Unnamed_Folder", max_len=100) for p in (rec.folder_parts or ["Inbox"])]
+                base_dir = os.path.join(out_root, *safe_parts)
 
-        out_bytes = normalize_eml_bytes_with_flags(raw, rec.flags) if normalize_headers else raw
-        size = len(out_bytes)
-        total_bytes += size
+            out_bytes = normalize_eml_bytes_with_flags(raw, rec.flags) if normalize_headers else raw
+            size = len(out_bytes)
+            total_bytes += size
 
-        part = active_part.get(base_dir, 1)
-        dest_dir = base_dir if part == 1 else f"{base_dir}__part{part}"
-        c = dir_counts.get(dest_dir, 0)
-        b = dir_bytes.get(dest_dir, 0)
-
-        while not fits_limits(c, b, size, max_per_dir, max_dir_bytes):
-            part += 1
-            active_part[base_dir] = part
-            dest_dir = f"{base_dir}__part{part}"
+            part = active_part.get(base_dir, 1)
+            dest_dir = base_dir if part == 1 else f"{base_dir}__part{part}"
             c = dir_counts.get(dest_dir, 0)
             b = dir_bytes.get(dest_dir, 0)
 
-        ensure_dir(dest_dir)
+            while not fits_limits(c, b, size, max_per_dir, max_dir_bytes):
+                part += 1
+                active_part[base_dir] = part
+                dest_dir = f"{base_dir}__part{part}"
+                c = dir_counts.get(dest_dir, 0)
+                b = dir_bytes.get(dest_dir, 0)
 
-        if naming == "index":
-            if dest_dir not in folder_indices:
-                folder_indices[dest_dir] = _next_eml_index(dest_dir)
-            folder_indices[dest_dir] += 1
-            fname = f"{folder_indices[dest_dir]:06d}.eml"
-        else:
-            fname = unique_eml_name(i, msg)
+            ensure_dir(dest_dir)
 
-        dest_path = os.path.join(dest_dir, fname)
-        if os.path.exists(win_long_path(dest_path)):
-            base_fname, ext = os.path.splitext(fname)
-            counter = 1
-            while os.path.exists(win_long_path(os.path.join(dest_dir, f"{base_fname}_{counter}{ext}"))):
-                counter += 1
-            dest_path = os.path.join(dest_dir, f"{base_fname}_{counter}{ext}")
+            if naming == "index":
+                if dest_dir not in folder_indices:
+                    folder_indices[dest_dir] = _next_eml_index(dest_dir)
+                folder_indices[dest_dir] += 1
+                fname = f"{folder_indices[dest_dir]:06d}.eml"
+            else:
+                fname = unique_eml_name(i, msg)
 
-        try:
-            with open(win_long_path(dest_path), "wb") as f:
-                f.write(out_bytes)
-            dir_counts[dest_dir] = c + 1
-            dir_bytes[dest_dir] = b + size
-            exported += 1
-            if logger and logger.audit_log_path:
-                logger.record_message(AuditRecord(
-                    timestamp=datetime.now(timezone.utc).isoformat(),
-                    status="SUCCESS",
-                    source_file=rec.source_name,
-                    source_folder=folder_display,
-                    target_location=dest_path,
-                    message_id=safe_get_header(msg, "Message-ID", ""),
-                    subject=safe_get_header(msg, "Subject", "(no subject)"),
-                    date=safe_get_header(msg, "Date", ""),
-                    sender=safe_get_header(msg, "From", ""),
-                    recipients="; ".join(safe_get_all_headers(msg, "To")),
-                    size_bytes=size,
-                    attachment_count=0,
-                    sha256=compute_sha256(raw) if logger.audit_log_path else "",
-                ))
-        except Exception as e:
-            # Zero-Data-Loss Emergency Fallback: preserve unwritten bytes to disk
-            fb_dir = os.path.join(out_root, "_unwritten_messages")
-            ensure_dir(fb_dir)
-            fb_path = os.path.join(fb_dir, f"unwritten_{i}_{sanitize_name(fname, max_len=60)}")
+            dest_path = os.path.join(dest_dir, fname)
+            if os.path.exists(win_long_path(dest_path)):
+                base_fname, ext = os.path.splitext(fname)
+                counter = 1
+                while os.path.exists(win_long_path(os.path.join(dest_dir, f"{base_fname}_{counter}{ext}"))):
+                    counter += 1
+                dest_path = os.path.join(dest_dir, f"{base_fname}_{counter}{ext}")
+
             try:
-                with open(win_long_path(fb_path), "wb") as fb:
-                    fb.write(out_bytes)
+                with open(win_long_path(dest_path), "wb") as f:
+                    f.write(out_bytes)
+                dir_counts[dest_dir] = c + 1
+                dir_bytes[dest_dir] = b + size
+                exported += 1
+                if logger and logger.audit_log_path:
+                    logger.record_message(AuditRecord(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        status="SUCCESS",
+                        source_file=rec.source_name,
+                        source_folder=folder_display,
+                        target_location=dest_path,
+                        message_id=safe_get_header(msg, "Message-ID", ""),
+                        subject=safe_get_header(msg, "Subject", "(no subject)"),
+                        date=safe_get_header(msg, "Date", ""),
+                        sender=safe_get_header(msg, "From", ""),
+                        recipients="; ".join(safe_get_all_headers(msg, "To")),
+                        size_bytes=size,
+                        attachment_count=0,
+                        sha256=compute_sha256(raw) if logger.audit_log_path else "",
+                    ))
+
+                if state and state.is_active:
+                    state.record_success(
+                        mid=mid,
+                        sha256=sha if sha else compute_sha256(raw),
+                        source_file=rec.source_name,
+                        folder=folder_display,
+                    )
+            except Exception as e:
+                # Zero-Data-Loss Emergency Fallback: preserve unwritten bytes to disk
+                fb_dir = os.path.join(out_root, "_unwritten_messages")
+                ensure_dir(fb_dir)
+                fb_path = os.path.join(fb_dir, f"unwritten_{i}_{sanitize_name(fname, max_len=60)}")
+                try:
+                    with open(win_long_path(fb_path), "wb") as fb:
+                        fb.write(out_bytes)
+                    if logger:
+                        logger.warn(f"Emergency preservation: saved unwritten EML to {fb_path}")
+                except Exception:
+                    pass
+
                 if logger:
-                    logger.warn(f"Emergency preservation: saved unwritten EML to {fb_path}")
-            except Exception:
-                pass
+                    logger.error(f"Failed to save {dest_path}", exc=e)
+                    logger.record_failure(
+                        source_file=rec.source_name,
+                        source_folder=folder_display,
+                        message_id=safe_get_header(msg, "Message-ID", ""),
+                        subject=safe_get_header(msg, "Subject", "(no subject)"),
+                        error_type=type(e).__name__,
+                        error_details=str(e),
+                    )
+                else:
+                    print(f"[WARN] Failed to save {dest_path}: {e}")
+                skipped += 1
+                failed += 1
 
-            if logger:
-                logger.error(f"Failed to save {dest_path}", exc=e)
-                logger.record_failure(
-                    source_file=rec.source_name,
-                    source_folder=folder_display,
-                    message_id=safe_get_header(msg, "Message-ID", ""),
-                    subject=safe_get_header(msg, "Subject", "(no subject)"),
-                    error_type=type(e).__name__,
-                    error_details=str(e),
-                )
-            else:
-                print(f"[WARN] Failed to save {dest_path}: {e}")
-            skipped += 1
-            failed += 1
+            if progress_every and progress_every > 0 and i % progress_every == 0:
+                elapsed = time.time() - started
+                rate = exported / elapsed if elapsed > 0 else 0
+                if logger:
+                    logger.info(f"Processed {i:,} | exported: {exported:,} | skipped: {skipped:,} | {rate:.1f} msg/s")
+                else:
+                    print(f"Processed {i:,} | exported: {exported:,} | skipped: {skipped:,} | {rate:.1f} msg/s")
 
-        if progress_every and progress_every > 0 and i % progress_every == 0:
-            elapsed = time.time() - started
-            rate = exported / elapsed if elapsed > 0 else 0
-            if logger:
-                logger.info(f"Processed {i:,} | exported: {exported:,} | skipped: {skipped:,} | {rate:.1f} msg/s")
-            else:
-                print(f"Processed {i:,} | exported: {exported:,} | skipped: {skipped:,} | {rate:.1f} msg/s")
+    finally:
+        if state:
+            state.close()
 
     if logger:
         logger.print_reconciliation_summary(
@@ -373,6 +450,8 @@ def export_to_eml(
             total_bytes=total_bytes,
             extra_details={"Distinct EML Directories": f"{len(dir_counts):,}"},
             skipped_duplicate=skipped_duplicate,
+            skipped_folder=skipped_folder,
+            skipped_state=skipped_state,
         )
 
     return exported, skipped, dir_counts, dir_bytes
@@ -405,9 +484,14 @@ def build_arg_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
         default="subject",
         help="EML filename format: 'subject' (<subject>__<hash>.eml) or 'index' (000001.eml)",
     )
+    ap.add_argument("--since", "--after", dest="since", help="Filter messages on or after date/time (e.g. 2023-01-01 or 2023-01-01T00:00:00)")
+    ap.add_argument("--until", "--before", dest="until", help="Filter messages on or before date/time (e.g. 2023-12-31 or 2023-12-31T23:59:59)")
+    ap.add_argument("--include-folder", dest="include_folders", action="append", help="Include only folders matching name/glob (repeatable)")
+    ap.add_argument("--exclude-folder", dest="exclude_folders", action="append", help="Exclude folders matching name/glob (repeatable)")
     ap.add_argument("--start-year", type=int, default=None, help="Export from this year (inclusive)")
     ap.add_argument("--end-year", type=int, default=None, help="Export up to this year (inclusive)")
     ap.add_argument("--max-per-dir", type=int, default=0, help="Max files per directory before rolling to __part2 (0 = unlimited)")
+    ap.add_argument("--split-size", "--max-dir-size", dest="split_size", help="Max directory size (e.g. 10GB, 500MB) before rolling to __part2")
     ap.add_argument("--max-dir-bytes", type=float, default=0.0, help="Max size per directory in GB before rolling to __part2 (0 = unlimited)")
     ap.add_argument("--sanitize-filenames", action="store_true", help="Sanitize filenames (enabled by default)")
     ap.add_argument("--include-deleted", action="store_true", help="Include messages marked expunged/deleted")
@@ -425,6 +509,11 @@ def build_arg_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
         const=True,
         default=None,
         help="Resume an interrupted migration by skipping messages already marked SUCCESS in the audit log or specified manifest file",
+    )
+    ap.add_argument(
+        "--state-file",
+        dest="state_file",
+        help="Path to persistent SQLite or JSONL state database for incremental / delta cutover sync across runs",
     )
     ap.add_argument(
         "--no-gmail-labels",
@@ -473,6 +562,10 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
 
     layout = args.layout or "folder"
 
+    max_dir_gb = args.max_dir_bytes
+    if args.split_size:
+        max_dir_gb = parse_size_bytes(args.split_size) / (1024**3)
+
     logger = AuditLogger(
         audit_log_path=args.audit_log,
         error_log_path=args.error_log,
@@ -492,8 +585,13 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
             naming=args.naming,
             start_year=args.start_year,
             end_year=args.end_year,
+            since=args.since,
+            until=args.until,
+            include_folders=args.include_folders,
+            exclude_folders=args.exclude_folders,
+            state_file=args.state_file,
             max_per_dir=args.max_per_dir,
-            max_dir_gb=args.max_dir_bytes,
+            max_dir_gb=max_dir_gb,
             include_deleted=args.include_deleted,
             normalize_headers=True,
             progress_every=args.progress_every,

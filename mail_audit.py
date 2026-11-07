@@ -248,6 +248,8 @@ class AuditLogger:
         total_bytes: int = 0,
         extra_details: Optional[Dict[str, Any]] = None,
         skipped_duplicate: int = 0,
+        skipped_folder: int = 0,
+        skipped_state: int = 0,
     ) -> None:
         elapsed = max(time.time() - start_time, 1e-6)
         rate = exported / elapsed
@@ -267,8 +269,12 @@ class AuditLogger:
             f"  Skipped (Duplicates): {skipped_duplicate:,}",
             f"  Skipped (Date Filter): {skipped_date:,}",
             f"  Skipped (Deleted):   {skipped_deleted:,}",
-            f"  Failed / Errors:     {failed:,}",
         ]
+        if skipped_folder > 0:
+            lines.append(f"  Skipped (Folder Rule): {skipped_folder:,}")
+        if skipped_state > 0:
+            lines.append(f"  Skipped (Delta / State): {skipped_state:,}")
+        lines.append(f"  Failed / Errors:     {failed:,}")
 
         if extra_details:
             lines.append("-" * 70)
