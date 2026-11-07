@@ -38,7 +38,7 @@ class TestMail2EmlAndMail2Mbox(unittest.TestCase):
         imap_root = os.path.join(self.tmpdir, "ImapMail")
         acct_dir = os.path.join(imap_root, "imap.example.com")
         os.makedirs(os.path.join(acct_dir, "Notes &- Invoices.sbd"), exist_ok=True)
-        tb_mbox = os.path.join(acct_dir, "Notes &- Invoices.sbd", "Caf&AOk-.")
+        tb_mbox = os.path.join(acct_dir, "Notes &- Invoices.sbd", "Caf&AOk-")
         tb_mbox_bytes = (
             b"From - Mon Jan 01 00:00:00 2024\r\n"
             b"Subject: Empty body message\r\n"
