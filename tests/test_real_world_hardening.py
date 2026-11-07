@@ -61,9 +61,12 @@ class TestRealWorldHardening(unittest.TestCase):
         self.assertEqual(pick_year_month(msg2), (2024, 8))
 
         # 3. Corrupted Date header with valid Received fallback
-        msg3 = EmailMessage()
-        msg3["Date"] = "corrupted date header string"
-        msg3["Received"] = "from gate.corp.com; Mon, 05 May 2025 09:30:00 -0400"
+        raw_msg3 = (
+            b"Date: corrupted date header string\r\n"
+            b"Received: from gate.corp.com; Mon, 05 May 2025 09:30:00 -0400\r\n\r\n"
+            b"Body"
+        )
+        msg3 = email.message_from_bytes(raw_msg3)
         dt3 = extract_best_datetime(msg3)
         self.assertIsNotNone(dt3)
         self.assertEqual(dt3.year, 2025)
