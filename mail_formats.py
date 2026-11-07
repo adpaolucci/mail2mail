@@ -2,7 +2,7 @@
 """
 mail_formats.py
 
-Unified multi-format email & mailbox reader for all2pst.
+Unified multi-format email & mailbox reader for mail2mail (mail2eml / mail2pst).
 Supports reading and streaming messages with folder hierarchy and status flags from:
   1. Standard MBOX files (mboxo / mboxrd) & Thunderbird ImapMail/Mail (.sbd, mUTF-7)
   2. Maildir & Maildir++ (cur/, new/, tmp/, :2,FRS flags, .Folder.Subfolder, Thunderbird Maildir)
