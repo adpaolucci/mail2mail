@@ -6,7 +6,7 @@ This document details how `mail2mail` implements Microsoft's Compound File Binar
 
 ## 1. [MS-CFB] — Compound File Binary File Format (OLE2)
 
-[`MiniOleReader`](../../mail_formats.py#L649-L837) in [`mail_formats.py`](../../mail_formats.py) is a zero-dependency, pure-Python parser for Microsoft Compound File Binary (`.msg`) files:
+[`_Ole2Reader`](../../mail_formats.py#L696-L846) in [`mail_formats.py`](../../mail_formats.py) is a zero-dependency, pure-Python parser for Microsoft Compound File Binary (`.msg`) files:
 
 | [MS-CFB] Section | Structure | Implementation Details |
 | :--- | :--- | :--- |
@@ -19,7 +19,7 @@ This document details how `mail2mail` implements Microsoft's Compound File Binar
 
 ## 2. [MS-OXMSG] — Outlook Item (`.msg`) File Format
 
-[`parse_msg_bytes`](../../mail_formats.py#L878-L1046) reconstructs a full RFC 5322 `EmailMessage` (with HTML/plain body, recipients, attachments, inline CIDs, and status flags) from an OLE2 `.msg` structure:
+[`parse_msg_bytes`](../../mail_formats.py#L887-L1055) reconstructs a full RFC 5322 `EmailMessage` (with HTML/plain body, recipients, attachments, inline CIDs, and status flags) from an OLE2 `.msg` structure:
 
 ### 2.1 Variable-Length Property Streams (`__substg1.0_XXXXYYYY`)
 - **`XXXX`** = 16-bit MAPI Property ID in uppercase hex; **`YYYY`** = 16-bit Property Type:

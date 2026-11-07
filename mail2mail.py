@@ -48,6 +48,14 @@ MBOX_EXCLUSIVE_FLAGS = {
     "--append",
 }
 
+EML_EXCLUSIVE_FLAGS = {
+    "--naming",
+    "--max-per-dir",
+    "--max-dir-bytes",
+    "--sanitize-filenames",
+    "--progress-every",
+}
+
 FLAGS_WITH_VALUE = {
     "--src",
     "--mbox",
@@ -65,6 +73,10 @@ FLAGS_WITH_VALUE = {
     "--end-year",
     "--flush-every",
     "--count-every",
+    "--naming",
+    "--max-per-dir",
+    "--max-dir-bytes",
+    "--progress-every",
 }
 
 
@@ -130,6 +142,8 @@ def _infer_mode(argv: List[str]) -> Tuple[str, List[str]]:
             return "pst", cleaned
         if flag_name in MBOX_EXCLUSIVE_FLAGS:
             return "mbox", cleaned
+        if flag_name in EML_EXCLUSIVE_FLAGS:
+            return "eml", cleaned
 
         if flag_name == "--out":
             if "=" in arg:

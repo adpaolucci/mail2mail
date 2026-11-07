@@ -43,9 +43,12 @@ try:
     import pythoncom
     import pywintypes
     import win32com.client as win32
+    HAS_PYWIN32 = True
 except Exception:
-    print("Error: pywin32 is not installed. Run:  pip install pywin32", file=sys.stderr)
-    sys.exit(1)
+    pythoncom = None
+    pywintypes = None
+    win32 = None
+    HAS_PYWIN32 = False
 
 from mail_formats import (
     FORBIDDEN_CHARS,
@@ -121,10 +124,11 @@ def com_retry(max_attempts: int = 5, base_delay: float = 0.25):
                     transient = hr in (-2147418111, -2147417846) or "call was rejected by callee" in str(exc).lower()
                     if not transient or attempt >= max_attempts:
                         raise
-                    try:
-                        pythoncom.PumpWaitingMessages()
-                    except Exception:
-                        pass
+                    if pythoncom is not None:
+                        try:
+                            pythoncom.PumpWaitingMessages()
+                        except Exception:
+                            pass
                     time.sleep(delay)
                     delay *= 1.8
         return wrapper
@@ -861,6 +865,10 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
     ap = build_arg_parser(prog=prog)
     args = ap.parse_args(argv)
 
+    if not HAS_PYWIN32:
+        print("Error: pywin32 is not installed. Run:  pip install pywin32", file=sys.stderr)
+        sys.exit(1)
+
     src = args.src_opt or args.src_pos
     target = args.out_pst or args.out_dir or args.out_pos
     if not src or not target:
@@ -927,15 +935,7 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
                 skipped += 1
                 continue
 
-            year = 1970
-            try:
-                date_str = safe_get_header(msg, "Date", "").strip()
-                if date_str:
-                    dt = parsedate_to_datetime(date_str)
-                    if dt is not None and 1900 <= dt.year <= 2100:
-                        year = dt.year
-            except Exception:
-                pass
+            year, _ = pick_year_month(msg)
 
             if args.start_year and year < args.start_year:
                 skipped += 1
@@ -956,7 +956,11 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
             dest = get_or_create_folder_path(root, pst_root_name, rel_dir)
 
             try:
-                pythoncom.PumpWaitingMessages()
+                if pythoncom is not None:
+                    try:
+                        pythoncom.PumpWaitingMessages()
+                    except Exception:
+                        pass
                 item = None
                 if rec.native_msg_path and os.path.isfile(win_long_path(rec.native_msg_path)):
                     try:
@@ -1025,7 +1029,8 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
             print("\n[WARN] Failed to close stores:", e)
         try:
             gc.collect()
-            pythoncom.CoUninitialize()
+            if pythoncom is not None:
+                pythoncom.CoUninitialize()
         except Exception:
             pass
 

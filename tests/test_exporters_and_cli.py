@@ -295,6 +295,12 @@ class TestMail2MailRouter(unittest.TestCase):
         self.assertEqual(mail2mail._infer_mode([r"D:\Archive.pst", r"D:\Archive.mbox.gz"])[0], "mbox")
         # MBOX source -> .pst destination must infer 'pst'
         self.assertEqual(mail2mail._infer_mode([r"D:\Inbox.mbox", r"D:\Out.pst"])[0], "pst")
+        # Flags with values preceding positional destination
+        self.assertEqual(mail2mail._infer_mode(["--start-year", "2020", r"D:\Inbox.mbox", r"D:\Out.pst"])[0], "pst")
+        self.assertEqual(mail2mail._infer_mode(["--end-year", "2024", r"D:\Inbox.mbox", r"D:\Out.mbox.gz"])[0], "mbox")
+        # EML exclusive flags infer 'eml'
+        self.assertEqual(mail2mail._infer_mode(["--naming", "index", r"D:\Inbox.mbox", r"D:\Export_EML"])[0], "eml")
+        self.assertEqual(mail2mail._infer_mode(["--max-per-dir", "5000", r"D:\Inbox.mbox", r"D:\Export_EML"])[0], "eml")
 
 
 if __name__ == "__main__":
