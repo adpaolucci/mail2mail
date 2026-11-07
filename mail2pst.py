@@ -69,6 +69,7 @@ from mail_formats import (
     sanitize_name,
     win_long_path,
 )
+from mail_audit import AuditLogger, AuditRecord, compute_sha256, perform_dry_run
 
 parse_message_flags = extract_message_flags
 sanitize_folder_name = sanitize_name
@@ -930,6 +931,12 @@ def build_arg_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
     ap.add_argument("--include-deleted", action="store_true", help="Import messages marked expunged/deleted")
     ap.add_argument("--flush-every", type=int, default=0, help="Detach/reattach PST every N items (0=off)")
     ap.add_argument("--count-every", type=int, default=200, help="Print folder Items.Count every N items (0=off)")
+    ap.add_argument("--audit-log", help="Path to write structured audit manifest (.csv or .jsonl)")
+    ap.add_argument("--error-log", help="Path to write structured failure report (.jsonl)")
+    ap.add_argument("--log-file", help="Path to write persistent operational log file")
+    ap.add_argument("--dry-run", action="store_true", help="Perform pre-flight inspection and report without modifying disk/PST")
+    ap.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
+    ap.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output, show only summary and errors")
     return ap
 
 
@@ -944,21 +951,28 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
     ap = build_arg_parser(prog=prog)
     args = ap.parse_args(argv)
 
+    src = args.src_opt or args.src_pos
+    if not src:
+        ap.error("A source path (positional or --src) is required.")
+
+    src = os.path.normpath(src)
+    if not os.path.exists(win_long_path(src)):
+        print(f"Source path not found: {src}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.dry_run:
+        perform_dry_run(src)
+        return
+
     if not HAS_PYWIN32:
         print("Error: pywin32 is not installed. Run:  pip install pywin32", file=sys.stderr)
         sys.exit(1)
 
     check_or_lift_outlook_attachment_limit()
 
-    src = args.src_opt or args.src_pos
     target = args.out_pst or args.out_dir or args.out_pos
-    if not src or not target:
+    if not target:
         ap.error("Both a source path (positional or --src) and an output target (positional, --out, or --out-dir) are required.")
-
-    src = os.path.normpath(src)
-    if not os.path.exists(win_long_path(src)):
-        print(f"Source path not found: {src}", file=sys.stderr)
-        sys.exit(1)
 
     # Determine whether target is a specific .pst file or an output directory
     single_pst_path: Optional[str] = None
@@ -974,7 +988,14 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
 
     os.makedirs(out_dir, exist_ok=True)
     total_bytes = estimate_source_bytes(src)
-    print(f"Source: {src} | Estimated size: {total_bytes / 1e9:,.2f} GB")
+
+    logger = AuditLogger(
+        audit_log_path=args.audit_log,
+        error_log_path=args.error_log,
+        log_file_path=args.log_file,
+        quiet=args.quiet,
+        verbose=args.verbose,
+    )
 
     app, ns = ensure_outlook_with_logon()
 
@@ -995,16 +1016,20 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
     processed = 0
     imported = 0
     skipped = 0
+    skipped_date = 0
+    skipped_deleted = 0
     done_bytes = 0
     tmpdir = tempfile.mkdtemp(prefix="mail2pst_")
     current_pst = None
 
     try:
+        logger.info(f"Source: {src} | Estimated size: {total_bytes / 1e9:,.2f} GB")
         for rec in iter_mail_records(src, include_deleted=True):
             raw = rec.raw_bytes
             sz = len(raw)
             processed += 1
             done_bytes += sz
+            folder_display = os.sep.join(rec.folder_parts) if rec.folder_parts else "Root"
 
             try:
                 msg = parser.parsebytes(raw)
@@ -1014,21 +1039,52 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
             flags = extract_message_flags(msg)
             if (rec.is_deleted or flags[4]) and not args.include_deleted:
                 skipped += 1
+                skipped_deleted += 1
+                if logger and logger.audit_log_path:
+                    logger.record_message(AuditRecord(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        status="SKIPPED_DELETED",
+                        source_file=rec.source_name,
+                        source_folder=folder_display,
+                        target_location="",
+                        message_id=safe_get_header(msg, "Message-ID", ""),
+                        subject=safe_get_header(msg, "Subject", "(no subject)"),
+                        date=safe_get_header(msg, "Date", ""),
+                        sender=safe_get_header(msg, "From", ""),
+                        recipients="; ".join(safe_get_all_headers(msg, "To")),
+                        size_bytes=sz,
+                        attachment_count=0,
+                        notes="Message marked deleted/expunged",
+                    ))
                 continue
 
             year, _ = pick_year_month(msg)
 
-            if args.start_year and year < args.start_year:
+            if (args.start_year and year < args.start_year) or (args.end_year and year > args.end_year):
                 skipped += 1
-                continue
-            if args.end_year and year > args.end_year:
-                skipped += 1
+                skipped_date += 1
+                if logger and logger.audit_log_path:
+                    logger.record_message(AuditRecord(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        status="SKIPPED_DATE",
+                        source_file=rec.source_name,
+                        source_folder=folder_display,
+                        target_location="",
+                        message_id=safe_get_header(msg, "Message-ID", ""),
+                        subject=safe_get_header(msg, "Subject", "(no subject)"),
+                        date=safe_get_header(msg, "Date", ""),
+                        sender=safe_get_header(msg, "From", ""),
+                        recipients="; ".join(safe_get_all_headers(msg, "To")),
+                        size_bytes=sz,
+                        attachment_count=0,
+                        notes=f"Filtered by date range ({args.start_year}-{args.end_year})",
+                    ))
                 continue
 
             store, root, pst_path = router.route(sz, year)
             if pst_path != current_pst:
                 current_pst = pst_path
-                print(f"\nCURRENT PST: {current_pst}")
+                logger.info(f"\nCURRENT PST: {current_pst}")
 
             folder_parts = rec.folder_parts
             if single_pst_path and not pst_root_name and not folder_parts:
@@ -1062,13 +1118,37 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
 
                 del item
                 imported += 1
+                if logger and logger.audit_log_path:
+                    logger.record_message(AuditRecord(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        status="SUCCESS",
+                        source_file=rec.source_name,
+                        source_folder=folder_display,
+                        target_location=f"{pst_path}::{rel_dir}",
+                        message_id=safe_get_header(msg, "Message-ID", ""),
+                        subject=safe_get_header(msg, "Subject", "(no subject)"),
+                        date=safe_get_header(msg, "Date", ""),
+                        sender=safe_get_header(msg, "From", ""),
+                        recipients="; ".join(safe_get_all_headers(msg, "To")),
+                        size_bytes=sz,
+                        attachment_count=0,
+                        sha256=compute_sha256(raw) if logger.audit_log_path else "",
+                    ))
             except Exception as e:
-                print(f"\n[WARN] Failed to save item from {rec.source_name}: {e}")
+                logger.error(f"Failed to save item from {rec.source_name}", exc=e)
+                logger.record_failure(
+                    source_file=rec.source_name,
+                    source_folder=folder_display,
+                    message_id=safe_get_header(msg, "Message-ID", ""),
+                    subject=safe_get_header(msg, "Subject", "(no subject)"),
+                    error_type=type(e).__name__,
+                    error_details=str(e),
+                )
                 skipped += 1
 
             if args.count_every and processed % args.count_every == 0:
                 try:
-                    print(f"\n  Items in '{dest.Name}': {dest.Items.Count}")
+                    logger.info(f"\n  Items in '{dest.Name}': {dest.Items.Count}")
                 except Exception:
                     pass
                 gc.collect()
@@ -1078,9 +1158,9 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
                     del dest
                     gc.collect()
                     store, root, pst_path = router.flush_pst(pst_path)
-                    print(f"\n[FLUSH] Re-attached PST: {pst_path}")
+                    logger.info(f"\n[FLUSH] Re-attached PST: {pst_path}")
                 except Exception as e:
-                    print(f"\n[WARN] Periodic flush failed: {e}")
+                    logger.warn(f"Periodic flush failed: {e}")
 
             if processed % 100 == 0:
                 pct = min(100.0, (done_bytes / max(total_bytes, 1)) * 100.0)
@@ -1088,22 +1168,43 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
                 rate = done_bytes / max(elapsed, 1e-9)
                 eta = max(0.0, (total_bytes - done_bytes)) / max(rate, 1e-9)
                 h, m, s = int(eta // 3600), int(eta % 3600 // 60), int(eta % 60)
-                print(
-                    f"\rProcessed: {processed:,} ({pct:6.2f}%) | "
-                    f"ETA {h:02d}:{m:02d}:{s:02d} | PST: {current_pst}",
-                    end="",
-                )
+                if not logger.quiet:
+                    sys.stdout.write(
+                        f"\rProcessed: {processed:,} ({pct:6.2f}%) | "
+                        f"ETA {h:02d}:{m:02d}:{s:02d} | PST: {current_pst}"
+                    )
+                    sys.stdout.flush()
 
         if processed == 0:
             print("No supported email messages found in source.", file=sys.stderr)
             sys.exit(1)
 
-        print("\nDone.")
-        print(f"Processed: {processed:,} | Imported: {imported:,} | Skipped: {skipped:,}")
-        print("PST(s) written to:", single_pst_path or out_dir)
+        logger.print_reconciliation_summary(
+            source=src,
+            target=single_pst_path or out_dir,
+            start_time=start,
+            total_scanned=processed,
+            exported=imported,
+            skipped_date=skipped_date,
+            skipped_deleted=skipped_deleted,
+            failed=skipped - skipped_date - skipped_deleted,
+            total_bytes=done_bytes,
+            extra_details={"Target PST Location": single_pst_path or out_dir},
+        )
 
     finally:
+        logger.close()
         shutil.rmtree(tmpdir, ignore_errors=True)
+        try:
+            router.close_all()
+        except Exception as e:
+            print("\n[WARN] Failed to close stores:", e)
+        try:
+            gc.collect()
+            if pythoncom is not None:
+                pythoncom.CoUninitialize()
+        except Exception:
+            pass
         try:
             router.close_all()
         except Exception as e:

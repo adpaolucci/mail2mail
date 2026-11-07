@@ -116,6 +116,12 @@ python mail2eml.py ^
 - `--max-dir-bytes GB`: Roll over when a directory reaches `GB` gigabytes (`0` = unlimited).
 - `--include-deleted`: Export messages marked as deleted/expunged.
 - `--progress-every N`: Print progress every `N` messages (default: `1000`).
+- `--audit-log FILE`: Generate structured audit manifest (`.csv` or `.jsonl`) with message metadata and SHA-256 hashes.
+- `--error-log FILE`: Record machine-readable failure/warning entries (`.jsonl`).
+- `--log-file FILE`: Mirror all operations with timestamps into a persistent log file.
+- `--dry-run`: Pre-flight inspection reporting folder counts, date ranges, and oversized attachments without writing to disk.
+- `-v` / `--verbose`: Enable verbose logging output.
+- `-q` / `--quiet`: Suppress live progress counters, printing only the final summary and errors.
 
 ---
 
@@ -141,6 +147,11 @@ python mail2mbox.py "D:\Mail\ImapMail" "D:\Backups\ByYear" --layout year --max-m
 - `--start-year YYYY` / `--end-year YYYY`: Filter messages by `Date` header year (inclusive).
 - `--include-deleted`: Include messages marked as deleted/expunged.
 - `--append`: Append to existing `.mbox` file(s) instead of overwriting.
+- `--audit-log FILE`: Generate structured audit manifest (`.csv` or `.jsonl`) with message metadata and SHA-256 hashes.
+- `--error-log FILE`: Record machine-readable failure/warning entries (`.jsonl`).
+- `--log-file FILE`: Mirror all operations with timestamps into a persistent log file.
+- `--dry-run`: Pre-flight inspection reporting folder counts, date ranges, and oversized attachments without writing to disk.
+- `-v` / `--verbose` & `-q` / `--quiet`: Control console output verbosity.
 
 ---
 
@@ -192,6 +203,39 @@ python mail2pst.py ^
 - `--include-deleted`: Import messages marked as deleted/expunged.
 - `--flush-every N`: Detach and re-attach the current PST every `N` items so Windows Explorer updates file size (`0` = off).
 - `--count-every N`: Print live folder item count every `N` items (default: `200`, `0` = off).
+- `--audit-log FILE`: Generate structured audit manifest (`.csv` or `.jsonl`) with message metadata and SHA-256 hashes.
+- `--error-log FILE`: Record machine-readable failure/warning entries (`.jsonl`).
+- `--log-file FILE`: Mirror all operations with timestamps into a persistent log file.
+- `--dry-run`: Pre-flight inspection reporting folder counts, date ranges, and oversized attachments without writing to disk/PST.
+- `-v` / `--verbose` & `-q` / `--quiet`: Control console output verbosity.
+
+---
+
+## Auditability, Pre-Flight Dry-Run & Forensic Logging
+
+`mail2mail` includes built-in forensic auditing, manifest generation, and pre-flight inspection tools suited for compliance, legal eDiscovery, and enterprise migrations:
+
+### 1) Pre-Flight Dry-Run Audit (`--dry-run`)
+Inspect a source mail file, folder, or multi-GB archive before performing any writes:
+```cmd
+python mail2mail.py --dry-run "D:\Mail\GoogleTakeout.zip"
+```
+Surfaces:
+- Total message count, payload size (GB/MB), and status breakdown (Read, Unread, Flagged, Deleted).
+- Date span (earliest and latest message date) and breakdown by year.
+- Folder hierarchy and volume distribution.
+- **Oversized Attachment Warnings**: Scans for attachments exceeding 20 MB / 25 MB that would trigger Outlook server limits.
+
+### 2) Structured Audit Manifest (`--audit-log <manifest.csv | manifest.jsonl>`)
+Generates an audit trail of every evaluated message:
+- Fields: `timestamp`, `status` (`SUCCESS`, `SKIPPED_DATE`, `SKIPPED_DELETED`, `FAILED`), `message_id`, `subject`, `date`, `sender`, `recipients`, `source_folder`, `target_location`, `size_bytes`, `attachment_count`, and `sha256` digest for chain-of-custody verification.
+
+```cmd
+python mail2mail.py pst "D:\Mail\ImapMail" "D:\PSTs\Mail.pst" --audit-log "D:\PSTs\audit.csv" --log-file "D:\PSTs\migration.log"
+```
+
+### 3) Dedicated Failure Log (`--error-log <failures.jsonl>`)
+Appends machine-readable JSON entries with exact message subjects, Message-IDs, error types, and exception details for any skipped or failed messages, eliminating manual log hunting.
 
 ---
 

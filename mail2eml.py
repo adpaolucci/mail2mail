@@ -25,6 +25,7 @@ import hashlib
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 from mail_formats import (
@@ -40,11 +41,13 @@ from mail_formats import (
     iter_mail_records,
     normalize_eml_bytes_with_flags,
     pick_year_month,
+    safe_get_all_headers,
     safe_get_header,
     sanitize_name,
     update_status_headers,
     win_long_path,
 )
+from mail_audit import AuditLogger, AuditRecord, compute_sha256, perform_dry_run
 
 _HEADER_PARSER = email.parser.BytesHeaderParser()
 
@@ -100,6 +103,7 @@ def export_to_eml(
     include_deleted: bool = False,
     normalize_headers: bool = True,
     progress_every: int = 1000,
+    logger: Optional[AuditLogger] = None,
 ) -> Tuple[int, int, Dict[str, int], Dict[str, int]]:
     """
     Export messages from any supported format into .eml files.
@@ -115,23 +119,60 @@ def export_to_eml(
 
     exported = 0
     skipped = 0
+    skipped_date = 0
+    skipped_deleted = 0
+    failed = 0
+    total_bytes = 0
     started = time.time()
+    i = 0
 
     for i, rec in enumerate(iter_mail_records(src_path, include_deleted=True), 1):
         raw = rec.raw_bytes
         msg = _HEADER_PARSER.parsebytes(raw)
         _, _, _, _, is_expunged = extract_message_flags(msg)
+        folder_display = os.sep.join(rec.folder_parts) if rec.folder_parts else "Root"
 
         if not include_deleted and (rec.is_deleted or is_expunged):
             skipped += 1
+            skipped_deleted += 1
+            if logger and logger.audit_log_path:
+                logger.record_message(AuditRecord(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    status="SKIPPED_DELETED",
+                    source_file=rec.source_name,
+                    source_folder=folder_display,
+                    target_location="",
+                    message_id=safe_get_header(msg, "Message-ID", ""),
+                    subject=safe_get_header(msg, "Subject", "(no subject)"),
+                    date=safe_get_header(msg, "Date", ""),
+                    sender=safe_get_header(msg, "From", ""),
+                    recipients="; ".join(safe_get_all_headers(msg, "To")),
+                    size_bytes=len(raw),
+                    attachment_count=0,
+                    notes="Message marked deleted/expunged",
+                ))
             continue
 
         year, month = pick_year_month(msg)
-        if start_year and year < start_year:
+        if (start_year and year < start_year) or (end_year and year > end_year):
             skipped += 1
-            continue
-        if end_year and year > end_year:
-            skipped += 1
+            skipped_date += 1
+            if logger and logger.audit_log_path:
+                logger.record_message(AuditRecord(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    status="SKIPPED_DATE",
+                    source_file=rec.source_name,
+                    source_folder=folder_display,
+                    target_location="",
+                    message_id=safe_get_header(msg, "Message-ID", ""),
+                    subject=safe_get_header(msg, "Subject", "(no subject)"),
+                    date=safe_get_header(msg, "Date", ""),
+                    sender=safe_get_header(msg, "From", ""),
+                    recipients="; ".join(safe_get_all_headers(msg, "To")),
+                    size_bytes=len(raw),
+                    attachment_count=0,
+                    notes=f"Filtered by date range ({start_year}-{end_year})",
+                ))
             continue
 
         if layout == "flat":
@@ -146,6 +187,7 @@ def export_to_eml(
 
         out_bytes = normalize_eml_bytes_with_flags(raw, rec.flags) if normalize_headers else raw
         size = len(out_bytes)
+        total_bytes += size
 
         part = active_part.get(base_dir, 1)
         dest_dir = base_dir if part == 1 else f"{base_dir}__part{part}"
@@ -176,14 +218,59 @@ def export_to_eml(
             dir_counts[dest_dir] = c + 1
             dir_bytes[dest_dir] = b + size
             exported += 1
+            if logger and logger.audit_log_path:
+                logger.record_message(AuditRecord(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    status="SUCCESS",
+                    source_file=rec.source_name,
+                    source_folder=folder_display,
+                    target_location=dest_path,
+                    message_id=safe_get_header(msg, "Message-ID", ""),
+                    subject=safe_get_header(msg, "Subject", "(no subject)"),
+                    date=safe_get_header(msg, "Date", ""),
+                    sender=safe_get_header(msg, "From", ""),
+                    recipients="; ".join(safe_get_all_headers(msg, "To")),
+                    size_bytes=size,
+                    attachment_count=0,
+                    sha256=compute_sha256(raw) if logger.audit_log_path else "",
+                ))
         except Exception as e:
-            print(f"[WARN] Failed to save {dest_path}: {e}")
+            if logger:
+                logger.error(f"Failed to save {dest_path}", exc=e)
+                logger.record_failure(
+                    source_file=rec.source_name,
+                    source_folder=folder_display,
+                    message_id=safe_get_header(msg, "Message-ID", ""),
+                    subject=safe_get_header(msg, "Subject", "(no subject)"),
+                    error_type=type(e).__name__,
+                    error_details=str(e),
+                )
+            else:
+                print(f"[WARN] Failed to save {dest_path}: {e}")
             skipped += 1
+            failed += 1
 
         if progress_every and progress_every > 0 and i % progress_every == 0:
             elapsed = time.time() - started
             rate = exported / elapsed if elapsed > 0 else 0
-            print(f"Processed {i:,} | exported: {exported:,} | skipped: {skipped:,} | {rate:.1f} msg/s")
+            if logger:
+                logger.info(f"Processed {i:,} | exported: {exported:,} | skipped: {skipped:,} | {rate:.1f} msg/s")
+            else:
+                print(f"Processed {i:,} | exported: {exported:,} | skipped: {skipped:,} | {rate:.1f} msg/s")
+
+    if logger:
+        logger.print_reconciliation_summary(
+            source=src_path,
+            target=out_root,
+            start_time=started,
+            total_scanned=i,
+            exported=exported,
+            skipped_date=skipped_date,
+            skipped_deleted=skipped_deleted,
+            failed=failed,
+            total_bytes=total_bytes,
+            extra_details={"Distinct EML Directories": f"{len(dir_counts):,}"},
+        )
 
     return exported, skipped, dir_counts, dir_bytes
 
@@ -222,6 +309,12 @@ def build_arg_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
     ap.add_argument("--sanitize-filenames", action="store_true", help="Sanitize filenames (enabled by default)")
     ap.add_argument("--include-deleted", action="store_true", help="Include messages marked expunged/deleted")
     ap.add_argument("--progress-every", type=int, default=1000, help="Log progress every N messages (0 = disabled)")
+    ap.add_argument("--audit-log", help="Path to write structured audit manifest (.csv or .jsonl)")
+    ap.add_argument("--error-log", help="Path to write structured failure report (.jsonl)")
+    ap.add_argument("--log-file", help="Path to write persistent operational log file")
+    ap.add_argument("--dry-run", action="store_true", help="Perform pre-flight inspection and report without modifying disk")
+    ap.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
+    ap.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output, show only summary and errors")
     return ap
 
 
@@ -237,47 +330,56 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
     args = ap.parse_args(argv)
 
     src = args.src_opt or args.src_pos
-    out_dir = args.out_opt or args.out_pos
-    if not src or not out_dir:
-        ap.error("Both a source path (positional or --src/--mbox) and destination (--out-dir) are required.")
+    if not src:
+        ap.error("A source path (positional or --src/--mbox) is required.")
 
     src_path = os.path.normpath(src)
-    out_root = os.path.normpath(out_dir)
     if not os.path.exists(win_long_path(src_path)):
         print(f"Error: source path not found: {src_path}", file=sys.stderr)
         sys.exit(1)
+
+    if args.dry_run:
+        perform_dry_run(src_path)
+        return
+
+    out_dir = args.out_opt or args.out_pos
+    if not out_dir:
+        ap.error("Both a source path (positional or --src/--mbox) and destination (--out-dir) are required.")
+
+    out_root = os.path.normpath(out_dir)
 
     layout = args.layout
     if layout is None:
         layout = "year" if (args.src_opt and not args.src_pos) else "folder"
 
-    print(f"[*] Source: {src_path}")
-    print(f"[*] Output directory: {out_root} (layout={layout}, naming={args.naming})")
-
-    started = time.time()
-    exported, skipped, dir_counts, dir_bytes = export_to_eml(
-        src_path=src_path,
-        out_root=out_root,
-        layout=layout,
-        naming=args.naming,
-        start_year=args.start_year,
-        end_year=args.end_year,
-        max_per_dir=args.max_per_dir,
-        max_dir_gb=args.max_dir_bytes,
-        include_deleted=args.include_deleted,
-        normalize_headers=True,
-        progress_every=args.progress_every,
+    logger = AuditLogger(
+        audit_log_path=args.audit_log,
+        error_log_path=args.error_log,
+        log_file_path=args.log_file,
+        quiet=args.quiet,
+        verbose=args.verbose,
     )
 
-    elapsed = time.time() - started
-    print("\nDone.")
-    print(f"Exported: {exported:,} | Skipped: {skipped:,} | Distinct dirs: {len(dir_counts):,}")
-    if exported:
-        print(f"Average speed: {exported / max(elapsed, 1e-9):.1f} msg/s")
-        top = sorted(dir_bytes.items(), key=lambda kv: kv[1], reverse=True)[:10]
-        print("\nTop directories by size:")
-        for p, bytes_ in top:
-            print(f" - {p} -> {bytes_ / 1e9:.2f} GB, {dir_counts.get(p, 0)} files")
+    try:
+        logger.info(f"[*] Source: {src_path}")
+        logger.info(f"[*] Output directory: {out_root} (layout={layout}, naming={args.naming})")
+
+        exported, skipped, dir_counts, dir_bytes = export_to_eml(
+            src_path=src_path,
+            out_root=out_root,
+            layout=layout,
+            naming=args.naming,
+            start_year=args.start_year,
+            end_year=args.end_year,
+            max_per_dir=args.max_per_dir,
+            max_dir_gb=args.max_dir_bytes,
+            include_deleted=args.include_deleted,
+            normalize_headers=True,
+            progress_every=args.progress_every,
+            logger=logger,
+        )
+    finally:
+        logger.close()
 
 
 if __name__ == "__main__":

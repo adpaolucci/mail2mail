@@ -51,6 +51,7 @@ from mail_formats import (
     sanitize_name,
     win_long_path,
 )
+from mail_audit import AuditLogger, AuditRecord, compute_sha256, perform_dry_run
 
 MBOXRD_BODY_FROM_RE = re.compile(rb"^(>*From )", re.MULTILINE)
 MBOX_FILE_EXTS = (".mbox", ".mbx", ".mbox.gz", ".mbox.bz2", ".mbox.xz")
@@ -315,6 +316,7 @@ def export_to_mbox(
     include_deleted: bool = False,
     max_mbox_gb: float = 0.0,
     overwrite: bool = True,
+    logger: Optional[AuditLogger] = None,
 ) -> Tuple[int, int]:
     """
     Universal converter that streams any supported mailbox format via
@@ -325,14 +327,22 @@ def export_to_mbox(
     pool = MboxWriterPool(max_gb=max_mbox_gb, overwrite=overwrite)
     written = 0
     skipped = 0
+    skipped_date = 0
+    skipped_deleted = 0
+    failed = 0
+    total_bytes = 0
+    started = time.time()
+    idx = 0
 
     src_stem = os.path.splitext(os.path.basename(os.path.normpath(src_path)))[0] or "Inbox"
 
     try:
         for idx, rec in enumerate(iter_mail_records(src_path, include_deleted=True), 1):
             raw_bytes = rec.raw_bytes
+            folder_display = os.sep.join(rec.folder_parts) if rec.folder_parts else "Root"
             if not raw_bytes:
                 skipped += 1
+                failed += 1
                 continue
 
             try:
@@ -349,14 +359,45 @@ def export_to_mbox(
             )
             if is_del and not include_deleted:
                 skipped += 1
+                skipped_deleted += 1
+                if logger and logger.audit_log_path:
+                    logger.record_message(AuditRecord(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        status="SKIPPED_DELETED",
+                        source_file=rec.source_name,
+                        source_folder=folder_display,
+                        target_location="",
+                        message_id=safe_get_header(msg, "Message-ID", ""),
+                        subject=safe_get_header(msg, "Subject", "(no subject)"),
+                        date=safe_get_header(msg, "Date", ""),
+                        sender=safe_get_header(msg, "From", ""),
+                        recipients="; ".join(safe_get_all_headers(msg, "To")),
+                        size_bytes=len(raw_bytes),
+                        attachment_count=0,
+                        notes="Message marked deleted/expunged",
+                    ))
                 continue
 
             year, month = pick_year_month(msg)
-            if start_year and year < start_year:
+            if (start_year and year < start_year) or (end_year and year > end_year):
                 skipped += 1
-                continue
-            if end_year and year > end_year:
-                skipped += 1
+                skipped_date += 1
+                if logger and logger.audit_log_path:
+                    logger.record_message(AuditRecord(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        status="SKIPPED_DATE",
+                        source_file=rec.source_name,
+                        source_folder=folder_display,
+                        target_location="",
+                        message_id=safe_get_header(msg, "Message-ID", ""),
+                        subject=safe_get_header(msg, "Subject", "(no subject)"),
+                        date=safe_get_header(msg, "Date", ""),
+                        sender=safe_get_header(msg, "From", ""),
+                        recipients="; ".join(safe_get_all_headers(msg, "To")),
+                        size_bytes=len(raw_bytes),
+                        attachment_count=0,
+                        notes=f"Filtered by date range ({start_year}-{end_year})",
+                    ))
                 continue
 
             if single_file_mode:
@@ -371,17 +412,66 @@ def export_to_mbox(
                     default_name=src_stem,
                 )
 
-            entry_bytes = format_mboxrd_entry(raw_bytes, msg=msg, flags=flags)
-            pool.write_entry(dest_mbox, entry_bytes)
-            written += 1
+            try:
+                entry_bytes = format_mboxrd_entry(raw_bytes, msg=msg, flags=flags)
+                actual_dest = pool.write_entry(dest_mbox, entry_bytes)
+                written += 1
+                total_bytes += len(entry_bytes)
+                if logger and logger.audit_log_path:
+                    logger.record_message(AuditRecord(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        status="SUCCESS",
+                        source_file=rec.source_name,
+                        source_folder=folder_display,
+                        target_location=actual_dest,
+                        message_id=safe_get_header(msg, "Message-ID", ""),
+                        subject=safe_get_header(msg, "Subject", "(no subject)"),
+                        date=safe_get_header(msg, "Date", ""),
+                        sender=safe_get_header(msg, "From", ""),
+                        recipients="; ".join(safe_get_all_headers(msg, "To")),
+                        size_bytes=len(entry_bytes),
+                        attachment_count=0,
+                        sha256=compute_sha256(raw_bytes) if logger.audit_log_path else "",
+                    ))
+            except Exception as e:
+                skipped += 1
+                failed += 1
+                if logger:
+                    logger.error(f"Failed to write mbox entry to {dest_mbox}", exc=e)
+                    logger.record_failure(
+                        source_file=rec.source_name,
+                        source_folder=folder_display,
+                        message_id=safe_get_header(msg, "Message-ID", ""),
+                        subject=safe_get_header(msg, "Subject", "(no subject)"),
+                        error_type=type(e).__name__,
+                        error_details=str(e),
+                    )
 
             if written % 250 == 0:
-                print(f"\rExported {written:,} messages (skipped {skipped:,})...", end="", flush=True)
+                if logger and not logger.quiet:
+                    sys.stdout.write(f"\rExported {written:,} messages (skipped {skipped:,})...")
+                    sys.stdout.flush()
+                elif not logger:
+                    print(f"\rExported {written:,} messages (skipped {skipped:,})...", end="", flush=True)
     finally:
         pool.close_all()
 
-    if written >= 250:
+    if written >= 250 and (not logger or not logger.quiet):
         print()
+
+    if logger:
+        logger.print_reconciliation_summary(
+            source=src_path,
+            target=target_path,
+            start_time=started,
+            total_scanned=idx,
+            exported=written,
+            skipped_date=skipped_date,
+            skipped_deleted=skipped_deleted,
+            failed=failed,
+            total_bytes=total_bytes,
+        )
+
     return written, skipped
 
 
@@ -410,6 +500,12 @@ def build_arg_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
     ap.add_argument("--end-year", type=int, default=None, help="Only export messages up to this year (inclusive)")
     ap.add_argument("--include-deleted", action="store_true", help="Include messages marked deleted/expunged")
     ap.add_argument("--append", action="store_true", help="Append to existing .mbox file(s) instead of overwriting")
+    ap.add_argument("--audit-log", help="Path to write structured audit manifest (.csv or .jsonl)")
+    ap.add_argument("--error-log", help="Path to write structured failure report (.jsonl)")
+    ap.add_argument("--log-file", help="Path to write persistent operational log file")
+    ap.add_argument("--dry-run", action="store_true", help="Perform pre-flight inspection and report without modifying disk")
+    ap.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
+    ap.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output, show only summary and errors")
     return ap
 
 
@@ -425,39 +521,54 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
     args = ap.parse_args(argv)
 
     src = args.src_opt or args.src_pos
-    target = args.out_file or args.out_dir or args.out_pos
-    if not src or not target:
-        ap.error("Both a source path (positional or --src) and an output target (positional, --out, or --out-dir) are required.")
+    if not src:
+        ap.error("A source path (positional or --src) is required.")
 
     src = os.path.abspath(src)
-    target = os.path.abspath(target)
-
     if not os.path.exists(win_long_path(src)):
         print(f"Error: Source path '{src}' does not exist.", file=sys.stderr)
         sys.exit(1)
+
+    if args.dry_run:
+        perform_dry_run(src)
+        return
+
+    target = args.out_file or args.out_dir or args.out_pos
+    if not target:
+        ap.error("Both a source path (positional or --src) and an output target (positional, --out, or --out-dir) are required.")
+
+    target = os.path.abspath(target)
 
     single_file_mode = bool(args.out_file) or (not args.out_dir and is_mbox_output_filename(target))
     if not single_file_mode:
         os.makedirs(win_long_path(target), exist_ok=True)
 
-    print(f"Starting mail2mbox export from: {src}")
-    print(f"Destination: {target} ({'single file' if single_file_mode else f'directory, layout={args.layout}'})")
-    print("-" * 60)
-
-    written, skipped = export_to_mbox(
-        src_path=src,
-        target_path=target,
-        single_file_mode=single_file_mode,
-        layout=args.layout,
-        start_year=args.start_year,
-        end_year=args.end_year,
-        include_deleted=args.include_deleted,
-        max_mbox_gb=args.max_mbox_gb,
-        overwrite=(not args.append),
+    logger = AuditLogger(
+        audit_log_path=args.audit_log,
+        error_log_path=args.error_log,
+        log_file_path=args.log_file,
+        quiet=args.quiet,
+        verbose=args.verbose,
     )
 
-    print("-" * 60)
-    print(f"Done. Exported: {written:,} | Skipped: {skipped:,} | Output: {target}")
+    try:
+        logger.info(f"Starting mail2mbox export from: {src}")
+        logger.info(f"Destination: {target} ({'single file' if single_file_mode else f'directory, layout={args.layout}'})")
+
+        written, skipped = export_to_mbox(
+            src_path=src,
+            target_path=target,
+            single_file_mode=single_file_mode,
+            layout=args.layout,
+            start_year=args.start_year,
+            end_year=args.end_year,
+            include_deleted=args.include_deleted,
+            max_mbox_gb=args.max_mbox_gb,
+            overwrite=(not args.append),
+            logger=logger,
+        )
+    finally:
+        logger.close()
 
 
 if __name__ == "__main__":

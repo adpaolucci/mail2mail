@@ -77,6 +77,9 @@ FLAGS_WITH_VALUE = {
     "--max-per-dir",
     "--max-dir-bytes",
     "--progress-every",
+    "--audit-log",
+    "--error-log",
+    "--log-file",
 }
 
 
