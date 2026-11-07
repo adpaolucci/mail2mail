@@ -160,7 +160,42 @@ def decode_imap_utf7(s: str) -> str:
     return "".join(out)
 
 
+def encode_imap_utf7(s: str) -> str:
+    """
+    Encode a Unicode folder name into IMAP Modified UTF-7 (RFC 3501 Section 5.1.3).
+    Printable US-ASCII (0x20..0x7E) is literal (except '&' -> '&-'); all other
+    characters are encoded as UTF-16BE Modified Base64 ('/' -> ',', no '=' padding)
+    wrapped in '&' ... '-'.
+    """
+    if not s:
+        return ""
+    out: List[str] = []
+    non_ascii_buf: List[str] = []
+
+    def _flush_buf() -> None:
+        if not non_ascii_buf:
+            return
+        utf16_bytes = "".join(non_ascii_buf).encode("utf-16-be")
+        b64 = base64.b64encode(utf16_bytes).decode("ascii").rstrip("=").replace("/", ",")
+        out.append(f"&{b64}-")
+        non_ascii_buf.clear()
+
+    for ch in s:
+        code = ord(ch)
+        if 0x20 <= code <= 0x7E:
+            _flush_buf()
+            if ch == "&":
+                out.append("&-")
+            else:
+                out.append(ch)
+        else:
+            non_ascii_buf.append(ch)
+    _flush_buf()
+    return "".join(out)
+
+
 decode_modified_utf7 = decode_imap_utf7
+encode_modified_utf7 = encode_imap_utf7
 
 
 def clean_folder_segment(name: str) -> str:

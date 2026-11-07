@@ -186,6 +186,24 @@ python mail2pst.py ^
 
 ---
 
+## Testing & RFC Compliance Reference
+
+### Running the Automated Test Suite
+The [`tests/`](file:///c:/Users/andre/Desktop/all2pst/tests/__init__.py) package verifies RFC compliance, all 10 mailbox formats, and all CLI exporters (`mail2eml`, `mail2mbox`, `mail2pst`, `mail2mail`):
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+### RFC & Format Specifications Reference (`docs/rfc_compliance/`)
+Detailed technical documentation mapping IETF RFCs and Microsoft Open Specifications to the codebase is located in [`docs/rfc_compliance/`](file:///c:/Users/andre/Desktop/all2pst/docs/rfc_compliance/README.md):
+- [`docs/rfc_compliance/README.md`](file:///c:/Users/andre/Desktop/all2pst/docs/rfc_compliance/README.md) — Master standards compliance matrix
+- [`docs/rfc_compliance/RFC5322_RFC2045_MIME_AND_HEADERS.md`](file:///c:/Users/andre/Desktop/all2pst/docs/rfc_compliance/RFC5322_RFC2045_MIME_AND_HEADERS.md) — RFC 5322, RFC 2045–2047, RFC 2183/2231/2392 (`cid:` MHTML), S/MIME & PGP/MIME
+- [`docs/rfc_compliance/RFC4155_MBOX_AND_MAILBOX_FORMATS.md`](file:///c:/Users/andre/Desktop/all2pst/docs/rfc_compliance/RFC4155_MBOX_AND_MAILBOX_FORMATS.md) — RFC 4155 (`mbox` / `mboxrd`), RFC 3501 §5.1.3 (IMAP Modified UTF-7), Thunderbird, Maildir++, Apple Mail `.emlx`, MH, MMDF, and Babyl
+- [`docs/rfc_compliance/MS_OXMSG_CFBF_MAPI_AND_OLM.md`](file:///c:/Users/andre/Desktop/all2pst/docs/rfc_compliance/MS_OXMSG_CFBF_MAPI_AND_OLM.md) — [MS-CFB] (OLE2), [MS-OXMSG] (`.msg`), [MS-OXPROPS] (MAPI DASL properties & `PT_SYSTIME`), and Outlook for Mac `.olm`
+
+---
+
 ## Troubleshooting
 
 - **PST file size appears stuck at ~265 KB in Windows Explorer while running**

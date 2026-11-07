@@ -208,6 +208,20 @@ def _decode_part_text(part) -> str:
         return ""
 
 
+def _walk_outer_parts(msg):
+    """
+    Walk MIME parts of `msg`, recursing into `multipart/*` containers but treating
+    encapsulated `message/rfc822` parts (RFC 2046 §5.2.1) as atomic leaf parts
+    so their inner bodies/attachments are not merged into the outer message.
+    """
+    if msg.get_content_maintype() == "multipart":
+        for sub in msg.get_payload() or []:
+            if hasattr(sub, "get_content_maintype"):
+                yield from _walk_outer_parts(sub)
+    else:
+        yield msg
+
+
 def pick_body(msg) -> Tuple[Optional[str], Optional[str], Set[int]]:
     """
     Extract (html, text, body_part_ids) from an email.message.Message.
@@ -217,10 +231,8 @@ def pick_body(msg) -> Tuple[Optional[str], Optional[str], Set[int]]:
     text = None
     body_parts: Set[int] = set()
 
-    if msg.is_multipart():
-        for part in msg.walk():
-            if part.is_multipart():
-                continue
+    if msg.get_content_maintype() == "multipart":
+        for part in _walk_outer_parts(msg):
             ctype = part.get_content_type()
             disp = safe_get_header(part, "Content-Disposition", "").lower()
             try:
@@ -260,13 +272,11 @@ def add_attachments(mail, msg, tmpdir: str, body_parts: Optional[Set[int]] = Non
     has_cid = False
     top_ctype = msg.get_content_type()
     is_opaque_smime = (
-        not msg.is_multipart()
+        msg.get_content_maintype() != "multipart"
         and ("pkcs7-mime" in top_ctype or "x-pkcs7-mime" in top_ctype)
     )
 
-    for part in msg.walk():
-        if part.is_multipart():
-            continue
+    for part in _walk_outer_parts(msg):
         if id(part) in body_parts:
             continue
 
