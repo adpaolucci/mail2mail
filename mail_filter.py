@@ -280,16 +280,19 @@ class FolderFilter:
 
 class MigrationState:
     """
-    Persistent migration state tracking engine supporting SQLite database
-    or JSON Lines checkpoint streams. Enables high-speed incremental migrations
-    by recording processed Message-IDs and SHA-256 hashes.
+    Persistent migration state tracking engine supporting SQLite database,
+    JSON Lines checkpoint streams, or mail2rust-compatible SyncCheckpoint JSON.
+    Enables high-speed incremental migrations by recording processed Message-IDs
+    and SHA-256 hashes across runs.
     """
     def __init__(self, state_path: Optional[str] = None):
         self.state_path = os.path.abspath(state_path) if state_path else None
         self._is_sqlite = False
         self._is_jsonl = False
+        self._is_json = False
         self._db: Optional[sqlite3.Connection] = None
         self._jsonl_fh = None
+        self._json_data: Dict[str, Any] = {}
         self._seen_keys: Set[str] = set()
         self._pending_records: List[Tuple[str, str, str, str, str, str]] = []
         self._batch_size = 500
@@ -300,6 +303,9 @@ class MigrationState:
             if low.endswith((".sqlite", ".sqlite3", ".db")):
                 self._is_sqlite = True
                 self._init_sqlite()
+            elif low.endswith(".json"):
+                self._is_json = True
+                self._init_json()
             else:
                 self._is_jsonl = True
                 self._init_jsonl()
@@ -360,6 +366,34 @@ class MigrationState:
                         pass
         self._jsonl_fh = open(self.state_path, "a", encoding="utf-8", errors="replace", buffering=1)
 
+    def _init_json(self) -> None:
+        ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        self._json_data = {
+            "id": f"chk_{ts_ms}",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source_id": "mail2mail",
+            "target_id": "migration",
+            "migrated_message_ids": [],
+            "folder_high_watermarks": {},
+            "total_bytes_migrated": 0,
+            "total_messages_migrated": 0,
+            "status": "completed",
+        }
+        if os.path.isfile(self.state_path):
+            try:
+                with open(self.state_path, "r", encoding="utf-8", errors="replace") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        self._json_data.update(data)
+                        mids = self._json_data.get("migrated_message_ids", [])
+                        for m in mids:
+                            if m:
+                                self._seen_keys.add(f"mid:{m}")
+                                self._seen_keys.add(f"sha256:{m}")
+                                self._seen_keys.add(m)
+            except Exception:
+                pass
+
     def is_completed(self, mid: str = "", sha256: str = "") -> bool:
         """Check if message has already been successfully migrated in a prior pass."""
         if not self.is_active:
@@ -395,6 +429,13 @@ class MigrationState:
             self._pending_records.append((primary_key, mid, sha256, source_file, folder, ts))
             if len(self._pending_records) >= self._batch_size:
                 self.flush()
+        elif self._is_json:
+            target_key = mid if mid else sha256
+            if target_key:
+                mids = self._json_data.setdefault("migrated_message_ids", [])
+                if target_key not in mids:
+                    mids.append(target_key)
+                    self._json_data["total_messages_migrated"] = len(mids)
         elif self._is_jsonl and self._jsonl_fh:
             rec = {
                 "key": primary_key,
@@ -422,6 +463,13 @@ class MigrationState:
             except Exception:
                 pass
             self._pending_records.clear()
+        elif self._is_json and self.state_path:
+            try:
+                self._json_data["timestamp"] = datetime.now(timezone.utc).isoformat()
+                with open(self.state_path, "w", encoding="utf-8") as f:
+                    json.dump(self._json_data, f, indent=2)
+            except Exception:
+                pass
         elif self._is_jsonl and self._jsonl_fh:
             try:
                 self._jsonl_fh.flush()

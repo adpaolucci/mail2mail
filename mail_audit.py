@@ -205,14 +205,47 @@ class AuditLogger:
         is_jsonl = manifest_path.lower().endswith((".jsonl", ".json", ".ndjson"))
         try:
             with open(lp, "r", encoding="utf-8", errors="replace") as f:
-                if is_jsonl:
+                if manifest_path.lower().endswith(".json"):
+                    content = f.read().strip()
+                    if content.startswith("{"):
+                        try:
+                            obj = json.loads(content)
+                            if "migrated_message_ids" in obj:
+                                for m in obj.get("migrated_message_ids", []):
+                                    if m:
+                                        completed.add(f"mid:{m}")
+                                        completed.add(f"sha256:{m}")
+                                        completed.add(m)
+                                return completed
+                        except Exception:
+                            pass
+                    # If not single-dict JSON, fall through to line-by-line reading
+                    lines = content.splitlines()
+                    for line in lines:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                            status = (obj.get("status") or "").strip()
+                            if "status" not in obj or not status or status.upper() == "SUCCESS":
+                                mid = (obj.get("message_id") or "").strip()
+                                sha = (obj.get("sha256") or "").strip()
+                                if mid:
+                                    completed.add(f"mid:{mid}")
+                                if sha:
+                                    completed.add(f"sha256:{sha}")
+                        except Exception:
+                            pass
+                elif is_jsonl:
                     for line in f:
                         line = line.strip()
                         if not line:
                             continue
                         try:
                             obj = json.loads(line)
-                            if obj.get("status") == "SUCCESS":
+                            status = (obj.get("status") or "").strip()
+                            if "status" not in obj or not status or status.upper() == "SUCCESS":
                                 mid = (obj.get("message_id") or "").strip()
                                 sha = (obj.get("sha256") or "").strip()
                                 if mid:
@@ -224,7 +257,8 @@ class AuditLogger:
                 else:
                     reader = csv.DictReader(f)
                     for row in reader:
-                        if row.get("status") == "SUCCESS":
+                        status = (row.get("status") or "").strip()
+                        if "status" not in row or not status or status.upper() == "SUCCESS":
                             mid = (row.get("message_id") or "").strip()
                             sha = (row.get("sha256") or "").strip()
                             if mid:
