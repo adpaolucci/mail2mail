@@ -1,0 +1,14 @@
+BABYL OPTIONS:
+Version: 5
+Labels:
+Note: Sample Emacs RMAIL Babyl mailbox file.
+
+1, unseen,,
+*** EOOH ***
+From: emacs-rmail@gnu.org
+To: hacker@gnu.org
+Subject: Emacs Babyl Mailbox Sample
+Date: Fri, 06 Nov 2026 07:00:00 +0000
+
+Hello from Emacs Babyl format!
+

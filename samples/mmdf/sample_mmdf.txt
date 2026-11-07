@@ -1,0 +1,15 @@
+
+From: mmdf-sender@host.com
+To: user@host.com
+Subject: MMDF First Message
+Date: Fri, 06 Nov 2026 08:00:00 +0000
+
+First message body in MMDF container.
+
+From: mmdf-sender@host.com
+To: user@host.com
+Subject: MMDF Second Message
+Date: Fri, 06 Nov 2026 08:30:00 +0000
+
+Second message body in MMDF container.
+

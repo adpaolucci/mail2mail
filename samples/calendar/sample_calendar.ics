@@ -1,0 +1,18 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Mail2Rust//NONSGML Calendar 3.3.0//EN
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+BEGIN:VEVENT
+UID:meeting-20261107T140000Z-01@mail2rust.local
+DTSTAMP:20261107T120000Z
+DTSTART:20261107T140000Z
+DTEND:20261107T150000Z
+SUMMARY:Q4 Migration Architecture Review & Verification
+DESCRIPTION:Reviewing pure-Rust MS-PST B-Tree generation and cyclic cipher performance.
+LOCATION:Conference Room Orion / Video Conference
+ORGANIZER;CN=Dr. Evelyn Vance:mailto:evelyn.vance@titan.corp
+ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;CN=Anthony Paolucci:mailto:adpaolucci@gmail.com
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR

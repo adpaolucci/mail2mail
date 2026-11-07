@@ -1,0 +1,21 @@
+BEGIN:VCARD
+VERSION:3.0
+FN:Dr. Evelyn Vance
+N:Vance;Evelyn;;Dr.;
+EMAIL;TYPE=INTERNET,PREF:evelyn.vance@titan.corp
+ORG:Titan Aerospace Technologies;Systems Engineering
+TITLE:Chief Systems Architect
+TEL;TYPE=WORK,VOICE:+1-415-555-0199
+ADR;TYPE=WORK:;;100 Innovation Way;San Francisco;CA;94105;USA
+NOTE:Lead examiner for eDiscovery migration certification.
+END:VCARD
+
+BEGIN:VCARD
+VERSION:3.0
+FN:Marcus Brody
+N:Brody;Marcus;;;
+EMAIL;TYPE=INTERNET:m.brody@titan.corp
+ORG:Titan Aerospace Technologies
+TITLE:Senior Systems Analyst
+TEL;TYPE=CELL:+1-415-555-0288
+END:VCARD

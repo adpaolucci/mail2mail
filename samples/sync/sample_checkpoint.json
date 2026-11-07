@@ -1,0 +1,18 @@
+{
+  "id": "chk_1794067866812",
+  "timestamp": "2026-11-07T16:11:06.812355700Z",
+  "source_id": "imap://mail.company.com:993",
+  "target_id": "C:\\Archives\\archive.pst",
+  "migrated_message_ids": [
+    "<spec-titan-002@mail2rust.local>",
+    "<spec-titan-001@mail2rust.local>",
+    "<audit-ediscovery-003@mail2rust.local>"
+  ],
+  "folder_high_watermarks": {
+    "Inbox": 2,
+    "Projects/Project Titan": 1
+  },
+  "total_bytes_migrated": 149800,
+  "total_messages_migrated": 3,
+  "status": "completed"
+}

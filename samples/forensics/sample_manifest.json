@@ -1,0 +1,15 @@
+{
+  "case_number": "CASE-2026-SEC-TITAN",
+  "examiner": "Anthony D. Paolucci (Lead Forensic Systems Engineer)",
+  "timestamp": "2026-11-07T16:11:06.810831200Z",
+  "source_container": "Enterprise Exchange / M365 Mailbox Store",
+  "target_container": "Archive_Output.pst",
+  "total_items": 3,
+  "total_size_bytes": 149800,
+  "root_sha256": "89404063da29b91734a6a87d2aa3ff8cfeac6234154fa358bee89612e1c7010c",
+  "bates_range": {
+    "start": "EVIDENCE-2026-0001000",
+    "end": "EVIDENCE-2026-0001002"
+  },
+  "tool_version": "mail2rust-forensics v3.3.0"
+}
