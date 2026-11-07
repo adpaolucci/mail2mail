@@ -4,10 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mail2mail"
-version = "2.1.0"
+version = "2.2.0"
 description = "Universal Email & Mailbox Converter (MBOX, Thunderbird ImapMail/Mail, Maildir/Maildir++, Apple Mail .emlx/.mbox, Outlook .msg/.olm/.pst, MH, MMDF, Babyl, EML, and compressed archives <-> EML, MBOX, or Outlook PST)"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 authors = [
     { name = "Andrew Paolucci", email = "andrew@paolucci.ca" },
@@ -37,7 +38,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
@@ -60,6 +60,9 @@ mail2pst = "mail2pst:main"
 [tool.setuptools]
 py-modules = [
     "mail_formats",
+    "mail_audit",
+    "mail_filter",
+    "mail_shutdown",
     "mail2mail",
     "mail2eml",
     "mail2mbox",

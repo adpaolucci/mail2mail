@@ -55,6 +55,7 @@ EML_EXCLUSIVE_FLAGS = {
     "--naming",
     "--max-per-dir",
     "--max-dir-bytes",
+    "--max-dir-size",
     "--sanitize-filenames",
     "--progress-every",
 }
@@ -85,6 +86,7 @@ FLAGS_WITH_VALUE = {
     "--exclude-folder",
     "--state-file",
     "--split-size",
+    "--max-dir-size",
     "--flush-every",
     "--count-every",
     "--naming",

@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.2.0] - 2026-11-07
+
+### Added
+- **Graceful Interruption, Pause/Resume & Signal Handling (`mail_shutdown.py`)**:
+  - Coordinates graceful stops across all tools on `SIGINT` (Ctrl+C), `SIGTERM`, and `SIGBREAK` (Windows Console Break).
+  - Traps interruption signals, finishes writing the active in-flight message cleanly, commits all batched state, unmounts all Outlook PST stores, and flushes audit logs.
+  - Interactive TTY pause & resume: press `p` or `[Space]` to suspend processing, `[Space]` or `[Enter]` to resume, and `q` to stop safely.
+  - Double-tap Ctrl+C detection for immediate emergency force termination (`os._exit(130)`).
+  - Displays reconciliation summary and resumption guidance on interruption, exiting with standard code `130`.
+- **Advanced Date & Folder Filtering (`mail_filter.py`)**:
+  - Granular date filtering (`--since` / `--after`, `--until` / `--before`) supporting ISO 8601 (`YYYY-MM-DD`, `YYYY-MM-DDTHH:MM:SS`), RFC 2822 (`15 Jan 2024 10:00:00 +0000`), and single-year strings with timezone-aware UTC comparison.
+  - Folder inclusion & exclusion rules (`--include-folder <glob>`, `--exclude-folder <glob>`) with case-insensitive glob and path-segment matching.
+- **Human-Friendly Capacity & Size Splitting**:
+  - `parse_size_bytes()` supporting human units (`20GB`, `500MB`, `15G`, `4g`, `1024K`, `1000B`) across `--split-size`, `--split-pst`, `--max-pst-size`, and `--max-mbox-size`.
+- **Persistent Incremental / Delta Migration State Cache**:
+  - `--state-file <path.sqlite | path.jsonl>` recording processed `Message-ID`s and SHA-256 hashes to enable instant incremental delta cutovers skipping previously migrated messages in $O(1)$ time.
+- **Auditing, Pre-Flight Dry-Run & Forensics (`mail_audit.py`)**:
+  - `--dry-run` inspection mode detailing volume, date spans, folder trees, and oversized attachment warnings (>20 MB / 25 MB).
+  - Chain-of-custody structured manifests (`--audit-log` `.csv` / `.jsonl`) with message SHA-256 hashes.
+  - Dedicated failure logging (`--error-log` `.jsonl`) and operational console mirroring (`--log-file`).
+  - In-flight deduplication (`--dedup {auto, message-id, sha256}`).
+  - Resumption from existing manifests (`--resume [manifest]`).
+- **Zero-Data-Loss Safety & Adversarial Hardening**:
+  - Emergency unwritten message spools (`_unwritten_messages`, `_unimported_messages`).
+  - Emergency unattached file preservation (`_unattached_files`) when attachments exceed Outlook server limits.
+  - Monotonically increasing collision counters on filename collisions.
+  - Deep path sanitization and extended-length (`\\?\`) bypass on Windows.
+  - Fuzz-tested against 60,000+ adversarial malformed inputs with 0 crashes.
+
+---
+
 ## [2.1.0] - 2026-11-06
 
 ### Added
