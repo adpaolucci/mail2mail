@@ -545,6 +545,12 @@ def traverse_and_convert(current_dir, current_outlook_folder, temp_dir, include_
 
 
 def main():
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(errors="replace")
+            except Exception:
+                pass
     ap = argparse.ArgumentParser(
         description="Convert a Thunderbird ImapMail/Mail account directory directly into an Outlook PST file."
     )

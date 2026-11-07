@@ -714,7 +714,7 @@ class PstRouter:
             store, root, actual = create_or_attach_pst(self.ns, desired, overwrite=self.overwrite)
             s.update({"path": actual, "store": store, "root": root, "bytes": 0})
             self._register_open(actual, root)
-            print(f"\nROTATED PST ({year}) → {actual}")
+            print(f"\nROTATED PST ({year}) -> {actual}")
         return s
 
     def route(self, approx_size, year_hint=None):
@@ -771,7 +771,13 @@ def list_eml_files(root_dir):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Import EML → PST (Outlook/MAPI) with split & progress")
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(errors="replace")
+            except Exception:
+                pass
+    ap = argparse.ArgumentParser(description="Import EML -> PST (Outlook/MAPI) with split & progress")
     ap.add_argument("--src", required=True, help="Root folder containing .eml files (recursively)")
     ap.add_argument("--out-dir", required=True, help="Directory to write .pst files")
     ap.add_argument("--base-name", default="emails", help="Base name for PST files")

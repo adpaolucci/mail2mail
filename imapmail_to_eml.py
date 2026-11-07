@@ -308,6 +308,12 @@ def traverse_and_export(current_dir, current_out_dir, include_deleted=False):
 
 
 def main():
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(errors="replace")
+            except Exception:
+                pass
     ap = argparse.ArgumentParser(
         description="Export a Thunderbird ImapMail/Mail account directory to an .eml folder hierarchy."
     )

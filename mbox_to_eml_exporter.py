@@ -120,7 +120,13 @@ def fits_limits(count_in_dir, bytes_in_dir, incoming_size, max_per_dir, max_dir_
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Export .mbox → .eml with layout and filters")
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(errors="replace")
+            except Exception:
+                pass
+    ap = argparse.ArgumentParser(description="Export .mbox -> .eml with layout and filters")
     ap.add_argument('--mbox', required=True, help='Path to the .mbox file')
     ap.add_argument('--out-dir', required=True, help='Destination directory for .eml files')
     ap.add_argument('--layout', choices=['year','month','flat'], default='year', help='Directory structure (year/month/flat)')
@@ -228,7 +234,7 @@ def main():
         top = sorted(dir_bytes.items(), key=lambda kv: kv[1], reverse=True)[:10]
         print("\nTop directories by size:")
         for p, bytes_ in top:
-            print(f" - {p} → {bytes_/1e9:.2f} GB, {dir_counts.get(p,0)} files")
+            print(f" - {p} -> {bytes_/1e9:.2f} GB, {dir_counts.get(p,0)} files")
 
 if __name__ == "__main__":
     main()
