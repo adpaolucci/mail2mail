@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 """
 tests/test_cross_compatibility.py
 
@@ -25,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from typing import Optional, Set
 import unittest
 
 import tests  # Ensure repo root is on sys.path
@@ -34,7 +37,7 @@ import mail2mbox
 from mail_audit import AuditLogger
 
 
-def find_mail2rust_binary() -> str | None:
+def find_mail2rust_binary() -> Optional[str]:
     """Locate the mail2rust executable via env var, sibling directories, or PATH."""
     env_bin = os.environ.get("MAIL2RUST_BIN")
     if env_bin and os.path.isfile(env_bin):
@@ -70,7 +73,7 @@ def count_emls(dir_path: str) -> int:
     return total
 
 
-def extract_message_ids_from_dir(dir_path: str) -> set[str]:
+def extract_message_ids_from_dir(dir_path: str) -> Set[str]:
     """Extract all Message-ID header values from all .eml files in directory."""
     mids = set()
     for root, _, files in os.walk(dir_path):
