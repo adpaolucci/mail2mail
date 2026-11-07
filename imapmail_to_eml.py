@@ -3,6 +3,14 @@ import binascii
 import os
 import re
 import sys
+from typing import Dict
+
+from mail_formats import (
+    MailRecord,
+    WINDOWS_RESERVED_NAMES,
+    iter_mail_records,
+    win_long_path,
+)
 
 # Thunderbird X-Mozilla-Status bitmask flags (from mailnews/base/public/nsMsgMessageFlags.h)
 MSG_FLAG_READ      = 0x0001
@@ -12,27 +20,12 @@ MSG_FLAG_EXPUNGED  = 0x0008  # Deleted (awaiting folder compaction)
 MSG_FLAG_FORWARDED = 0x1000  # Forwarded
 
 FORBIDDEN_CHARS = r'\/:*?"<>|'
-WINDOWS_RESERVED_NAMES = {
-    "CON", "PRN", "AUX", "NUL",
-    *(f"COM{i}" for i in range(1, 10)),
-    *(f"LPT{i}" for i in range(1, 10)),
-}
 IGNORED_DIR_SUFFIXES = ('.mozmsgs', '.wdseml')
-
-
-def win_long_path(path: str) -> str:
-    """Add \\\\?\\ long-path prefix on Windows when path approaches MAX_PATH (260 chars)."""
-    abspath = os.path.abspath(path)
-    if os.name != "nt" or abspath.startswith("\\\\?\\") or len(abspath) < 240:
-        return path
-    if abspath.startswith("\\\\"):
-        return "\\\\?\\UNC\\" + abspath[2:]
-    return "\\\\?\\" + abspath
 
 
 def decode_modified_utf7(name):
     """
-    Decodes IMAP Modified UTF-7 (RFC 3501) folder names used by Thunderbird.
+    Decodes IMAP Modified UTF-7 (RFC 3501) folder names used by Thunderbird and Maildir++.
     Example: 'Notes &- Invoices' -> 'Notes & Invoices', 'Caf&AOk-' -> 'Café'
     """
     if '&' not in name:
@@ -173,6 +166,30 @@ def update_status_headers(raw_header_bytes, is_read, is_flagged, is_replied, is_
     return b"".join(filtered_lines)
 
 
+def _normalize_eml_bytes_with_flags(raw_bytes: bytes, flags: Dict[str, bool]) -> bytes:
+    """Split raw RFC 822 message into headers + body and apply update_status_headers."""
+    sep_crlf = raw_bytes.find(b"\r\n\r\n")
+    sep_lf = raw_bytes.find(b"\n\n")
+    if sep_crlf != -1 and (sep_lf == -1 or sep_crlf < sep_lf):
+        hdr = raw_bytes[:sep_crlf]
+        body = raw_bytes[sep_crlf + 4 :]
+    elif sep_lf != -1:
+        hdr = raw_bytes[:sep_lf]
+        body = raw_bytes[sep_lf + 2 :]
+    else:
+        hdr = raw_bytes
+        body = b""
+
+    tb_read, tb_flagged, tb_replied, tb_forwarded, _ = parse_thunderbird_flags(hdr)
+    is_read = flags.get("is_read", tb_read)
+    is_flagged = flags.get("is_flagged", False) or tb_flagged
+    is_replied = flags.get("is_replied", False) or tb_replied
+    is_forwarded = flags.get("is_forwarded", False) or tb_forwarded
+
+    norm_hdr = update_status_headers(hdr, is_read, is_flagged, is_replied, is_forwarded)
+    return norm_hdr.rstrip(b"\r\n") + b"\r\n\r\n" + body
+
+
 def _next_eml_index(dest_folder):
     """Return the highest existing numeric .eml index in dest_folder so collisions append cleanly."""
     max_idx = 0
@@ -227,7 +244,6 @@ def export_mbox_stream(mbox_path, dest_folder, include_deleted=False):
                 if line in (b'\r\n', b'\n', b'\r'):
                     break
                 if line.startswith(b'From '):
-                    # Next message started before a blank line (either consecutive From_ or header-only msg)
                     hit_next_from_in_headers = True
                     break
                 header_lines.append(line)
@@ -241,7 +257,6 @@ def export_mbox_stream(mbox_path, dest_folder, include_deleted=False):
             if is_expunged and not include_deleted:
                 skipped_deleted += 1
                 if not hit_next_from_in_headers:
-                    # Advance stream to next 'From ' boundary without writing a file
                     while True:
                         line = f.readline()
                         if not line or line.startswith(b'From '):
@@ -261,9 +276,6 @@ def export_mbox_stream(mbox_path, dest_folder, include_deleted=False):
                 out_f.write(b'\r\n\r\n')
 
                 if not hit_next_from_in_headers:
-                    # Stream body until next mbox 'From ' envelope line or EOF.
-                    # Hold a single trailing blank line in pending_blank so the mbox
-                    # inter-message blank line separator is not appended to the body.
                     pending_blank = b''
                     while True:
                         line = f.readline()
@@ -272,8 +284,6 @@ def export_mbox_stream(mbox_path, dest_folder, include_deleted=False):
                                 out_f.write(pending_blank)
                             break
 
-                        # In mboxrd (Thunderbird), body lines starting with 'From ' are always
-                        # escaped as '>From ', so an unescaped 'From ' is an envelope boundary.
                         if line.startswith(b'From '):
                             break
 
@@ -285,7 +295,6 @@ def export_mbox_stream(mbox_path, dest_folder, include_deleted=False):
                             pending_blank = line
                             continue
 
-                        # Reverse mboxrd quote escaping (e.g. '>From ' -> 'From ', '>>From ' -> '>From ')
                         if line.startswith(b'>') and line.lstrip(b'>').startswith(b'From '):
                             out_f.write(line[1:])
                         else:
@@ -301,49 +310,50 @@ def export_mbox_stream(mbox_path, dest_folder, include_deleted=False):
     return written_in_run, skipped_deleted
 
 
-def traverse_and_export(current_dir, current_out_dir, include_deleted=False):
+def export_multi_format_source(src_path, dest_root, include_deleted=False):
     """
-    Recursively walks ImapMail/Mail directories to replicate folder trees
-    from mbox files, .sbd containers, and account subdirectories.
+    Universal exporter using mail_formats.iter_mail_records.
+    Supports Thunderbird mbox & Maildir, Maildir/Maildir++, Apple Mail .emlx/.mbox bundles,
+    Outlook .msg, Outlook for Mac .olm, MH, MMDF, Babyl, and compressed .gz/.bz2/.xz/.zip/.tar* archives.
     Returns (total_written, total_skipped_deleted).
     """
-    try:
-        entries = sorted(os.listdir(win_long_path(current_dir)))
-    except Exception as e:
-        print(f"[!] Access error reading {current_dir}: {e}")
-        return 0, 0
-
+    folder_counters: Dict[str, int] = {}
     total_written = 0
     total_skipped = 0
 
-    # 1. Process MBOX files
-    for entry in entries:
-        full_path = os.path.join(current_dir, entry)
-        if os.path.isfile(win_long_path(full_path)) and is_probable_mbox(full_path):
-            folder_name = sanitize_filename(entry)
-            target_eml_dir = os.path.join(current_out_dir, folder_name)
-            w, s = export_mbox_stream(full_path, target_eml_dir, include_deleted=include_deleted)
-            total_written += w
-            total_skipped += s
+    for rec in iter_mail_records(src_path, include_deleted=True):
+        if rec.is_deleted and not include_deleted:
+            total_skipped += 1
+            continue
 
-    # 2. Process .sbd subdirectories and account folders (if user pointed at ImapMail/ or Mail/ root)
-    for entry in entries:
-        full_path = os.path.join(current_dir, entry)
-        if not os.path.isdir(win_long_path(full_path)):
-            continue
-        lower = entry.lower()
-        if entry.startswith('.') or lower.endswith(IGNORED_DIR_SUFFIXES):
-            continue
-        if lower.endswith(".sbd"):
-            parent_folder_name = sanitize_filename(entry[:-4])
-        else:
-            parent_folder_name = sanitize_filename(entry)
-        nested_out_dir = os.path.join(current_out_dir, parent_folder_name)
-        w, s = traverse_and_export(full_path, nested_out_dir, include_deleted=include_deleted)
-        total_written += w
-        total_skipped += s
+        safe_parts = [sanitize_filename(p) for p in (rec.folder_parts or ["Inbox"])]
+        target_dir = os.path.join(dest_root, *safe_parts)
+        if target_dir not in folder_counters:
+            os.makedirs(win_long_path(target_dir), exist_ok=True)
+            folder_counters[target_dir] = _next_eml_index(target_dir)
+
+        folder_counters[target_dir] += 1
+        idx = folder_counters[target_dir]
+        out_eml_path = os.path.join(target_dir, f"{idx:06d}.eml")
+
+        norm_bytes = _normalize_eml_bytes_with_flags(rec.raw_bytes, rec.flags)
+        with open(win_long_path(out_eml_path), "wb") as out_f:
+            out_f.write(norm_bytes)
+
+        total_written += 1
+        if total_written % 500 == 0:
+            print(f"    -> {total_written} messages written...")
 
     return total_written, total_skipped
+
+
+def traverse_and_export(current_dir, current_out_dir, include_deleted=False):
+    """
+    Walks a directory or archive of any supported mailbox format and exports a 1:1
+    hierarchy of .eml files into current_out_dir.
+    Returns (total_written, total_skipped_deleted).
+    """
+    return export_multi_format_source(current_dir, current_out_dir, include_deleted=include_deleted)
 
 
 def main():
@@ -354,14 +364,18 @@ def main():
             except Exception:
                 pass
     ap = argparse.ArgumentParser(
-        description="Export a Thunderbird ImapMail/Mail account directory (or single mbox) to an .eml folder hierarchy."
+        description=(
+            "Export Thunderbird ImapMail/Mail (mbox or Maildir), Maildir/Maildir++, "
+            "Apple Mail (.mbox/.emlx), Outlook (.msg/.olm), MH, MMDF, Babyl, or "
+            "compressed archives (.zip/.tgz/.gz) into an .eml folder hierarchy."
+        )
     )
-    ap.add_argument("imap_src", help="Path to Thunderbird ImapMail/Mail directory or a single mbox file")
+    ap.add_argument("imap_src", help="Path to source mail directory, mailbox file, or archive")
     ap.add_argument("dest_dir", help="Destination directory for exported .eml files")
     ap.add_argument(
         "--include-deleted",
         action="store_true",
-        help="Include messages marked as expunged/deleted (0x0008) in X-Mozilla-Status",
+        help="Include messages marked as expunged/deleted",
     )
     args = ap.parse_args()
 
@@ -373,24 +387,18 @@ def main():
         sys.exit(1)
 
     os.makedirs(win_long_path(dest_dir), exist_ok=True)
-    print(f"[*] Starting direct EML export from: {imap_src}")
+    print(f"[*] Starting EML export from: {imap_src}")
     print(f"[*] Destination directory: {dest_dir}\n")
 
-    if os.path.isfile(win_long_path(imap_src)):
+    if os.path.isfile(win_long_path(imap_src)) and is_probable_mbox(imap_src):
         folder_name = sanitize_filename(os.path.splitext(os.path.basename(imap_src))[0])
-        target_eml_dir = os.path.join(dest_dir, folder_name)
-        total_written, total_skipped = export_mbox_stream(
-            imap_src, target_eml_dir, include_deleted=args.include_deleted
+        w, s = export_mbox_stream(
+            imap_src, os.path.join(dest_dir, folder_name), include_deleted=args.include_deleted
         )
     else:
-        total_written, total_skipped = traverse_and_export(
-            imap_src, dest_dir, include_deleted=args.include_deleted
-        )
+        w, s = export_multi_format_source(imap_src, dest_dir, include_deleted=args.include_deleted)
 
-    print(
-        f"\n[+] Full mailbox export finished: {total_written:,} messages exported"
-        + (f" ({total_skipped:,} deleted/expunged skipped)." if total_skipped else ".")
-    )
+    print(f"\n[SUCCESS] Export complete! Total saved: {w:,} | Skipped deleted: {s:,}")
 
 
 if __name__ == "__main__":

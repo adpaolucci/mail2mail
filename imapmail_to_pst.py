@@ -14,6 +14,8 @@ from email import policy
 from email.header import decode_header, make_header
 from email.utils import getaddresses, parsedate_to_datetime
 
+from mail_formats import iter_mail_records
+
 try:
     import pythoncom
     import pywintypes
@@ -620,45 +622,114 @@ def import_mbox_to_outlook(mbox_path, outlook_folder, temp_dir, include_deleted=
     return count, skipped_deleted
 
 
-def traverse_and_convert(current_dir, current_outlook_folder, temp_dir, include_deleted=False):
-    """Recursively walks through Thunderbird mbox files, .sbd directories, and account folders."""
+@com_retry()
+def import_native_msg_to_outlook(namespace, outlook_folder, msg_path):
+    """
+    Open a standalone Outlook .msg file via MAPI OpenSharedItem, copy it,
+    and move the copy directly into outlook_folder for 100% MAPI fidelity.
+    """
+    shared_item = namespace.OpenSharedItem(os.path.abspath(msg_path))
     try:
-        entries = sorted(os.listdir(win_long_path(current_dir)))
-    except Exception as e:
-        print(f"[!] Access error reading {current_dir}: {e}")
-        return 0, 0
+        copied = shared_item.Copy()
+        moved = copied.Move(outlook_folder)
+        moved.Save()
+        del moved
+    finally:
+        try:
+            shared_item.Close(1)  # 1 = olDiscard
+        except Exception:
+            pass
+        del shared_item
 
+
+def convert_source_to_outlook(
+    src_path,
+    root_outlook_folder,
+    temp_dir,
+    include_deleted=False,
+    namespace=None,
+):
+    """
+    Universal converter that streams any supported mailbox format via
+    mail_formats.iter_mail_records (Thunderbird mbox & Maildir, Maildir/Maildir++,
+    Apple Mail .emlx/.mbox bundles, Outlook .msg, Outlook for Mac .olm, MH, MMDF,
+    Babyl, .eml trees, and .zip/.tgz/.gz archives) into root_outlook_folder.
+    Returns (total_imported, total_skipped).
+    """
+    folder_cache = {(): root_outlook_folder}
     total_imported = 0
     total_skipped = 0
 
-    # Process MBOX files
-    for entry in entries:
-        full_path = os.path.join(current_dir, entry)
-        if os.path.isfile(win_long_path(full_path)) and is_probable_mbox(full_path):
-            target_folder = get_or_create_subfolder(current_outlook_folder, entry)
-            c, s = import_mbox_to_outlook(
-                full_path, target_folder, temp_dir, include_deleted=include_deleted
-            )
-            total_imported += c
-            total_skipped += s
+    def _resolve_folder(parts):
+        key = tuple(parts)
+        if key in folder_cache:
+            return folder_cache[key]
+        curr = root_outlook_folder
+        built = []
+        for p in parts:
+            built.append(p)
+            sub_key = tuple(built)
+            if sub_key in folder_cache:
+                curr = folder_cache[sub_key]
+            else:
+                curr = get_or_create_subfolder(curr, p)
+                folder_cache[sub_key] = curr
+        return curr
 
-    # Process .sbd container folders and account subdirectories
-    for entry in entries:
-        full_path = os.path.join(current_dir, entry)
-        if not os.path.isdir(win_long_path(full_path)):
+    for idx, rec in enumerate(iter_mail_records(src_path, include_deleted=True), 1):
+        raw_bytes = rec.raw_bytes
+        if not raw_bytes:
             continue
-        lower = entry.lower()
-        if entry.startswith('.') or lower.endswith(IGNORED_DIR_SUFFIXES):
+
+        try:
+            parsed = email.message_from_bytes(raw_bytes, policy=policy.default)
+            flags = parse_message_flags(parsed)
+            if (rec.is_deleted or flags[4]) and not include_deleted:
+                total_skipped += 1
+                continue
+
+            folder_parts = rec.folder_parts or ["Inbox"]
+            target_folder = _resolve_folder(folder_parts)
+
+            pythoncom.PumpWaitingMessages()
+
+            imported_native = False
+            if namespace is not None and rec.native_msg_path and os.path.isfile(win_long_path(rec.native_msg_path)):
+                try:
+                    import_native_msg_to_outlook(namespace, target_folder, rec.native_msg_path)
+                    imported_native = True
+                except Exception:
+                    imported_native = False
+
+            if not imported_native:
+                new_item = target_folder.Items.Add(0)  # 0 = olMailItem
+                populate_mailitem(new_item, parsed, raw_bytes, temp_dir, flags=flags)
+                del new_item
+
+            total_imported += 1
+            if total_imported % 100 == 0:
+                print(f"    -> {total_imported} items imported...")
+                gc.collect()
+        except Exception as err:
+            print(f"    [!] Skipped message #{idx} ({rec.source_name}): {err}")
             continue
-        parent_folder_name = entry[:-4] if lower.endswith(".sbd") else entry
-        nested_outlook_folder = get_or_create_subfolder(current_outlook_folder, parent_folder_name)
-        c, s = traverse_and_convert(
-            full_path, nested_outlook_folder, temp_dir, include_deleted=include_deleted
-        )
-        total_imported += c
-        total_skipped += s
 
     return total_imported, total_skipped
+
+
+def traverse_and_convert(current_dir, current_outlook_folder, temp_dir, include_deleted=False, namespace=None):
+    """
+    Walks through any supported mailbox directory or archive (Thunderbird mbox/Maildir,
+    Maildir/Maildir++, Apple Mail .mbox/.emlx, Outlook .msg/.olm, MH, MMDF, Babyl,
+    .eml, and compressed archives) and imports into current_outlook_folder.
+    """
+    return convert_source_to_outlook(
+        current_dir,
+        current_outlook_folder,
+        temp_dir,
+        include_deleted=include_deleted,
+        namespace=namespace,
+    )
 
 
 def main():
@@ -669,14 +740,18 @@ def main():
             except Exception:
                 pass
     ap = argparse.ArgumentParser(
-        description="Convert a Thunderbird ImapMail/Mail directory (or single mbox) directly into an Outlook PST file."
+        description=(
+            "Convert Thunderbird ImapMail/Mail (mbox or Maildir), Maildir/Maildir++, "
+            "Apple Mail (.mbox/.emlx), Outlook (.msg/.olm), MH, MMDF, Babyl, EML, "
+            "or compressed archives (.zip/.tgz/.gz) directly into an Outlook PST file."
+        )
     )
-    ap.add_argument("imap_src", help="Path to Thunderbird ImapMail/Mail directory or a single mbox file")
+    ap.add_argument("imap_src", help="Path to source mail directory, mailbox file, or archive")
     ap.add_argument("pst_dest", help="Output .pst file path")
     ap.add_argument(
         "--include-deleted",
         action="store_true",
-        help="Include messages marked as expunged/deleted (0x0008) in X-Mozilla-Status",
+        help="Include messages marked as expunged/deleted",
     )
     args = ap.parse_args()
 
@@ -740,16 +815,13 @@ def main():
     temp_staging = tempfile.mkdtemp(prefix="tb_pst_")
 
     try:
-        if os.path.isfile(win_long_path(imap_src)):
-            folder_name = os.path.splitext(os.path.basename(imap_src))[0]
-            target_folder = get_or_create_subfolder(pst_root, folder_name)
-            total_imported, total_skipped = import_mbox_to_outlook(
-                imap_src, target_folder, temp_staging, include_deleted=args.include_deleted
-            )
-        else:
-            total_imported, total_skipped = traverse_and_convert(
-                imap_src, pst_root, temp_staging, include_deleted=args.include_deleted
-            )
+        total_imported, total_skipped = convert_source_to_outlook(
+            imap_src,
+            pst_root,
+            temp_staging,
+            include_deleted=args.include_deleted,
+            namespace=namespace,
+        )
         print(
             f"\n[+] Total imported: {total_imported:,}"
             + (f" ({total_skipped:,} deleted/expunged skipped)" if total_skipped else "")

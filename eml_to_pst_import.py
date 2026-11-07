@@ -62,6 +62,8 @@ from email.header import decode_header, make_header
 from email.parser import BytesParser
 from email.utils import getaddresses, parsedate_to_datetime
 
+from mail_formats import iter_mail_records
+
 try:
     import pythoncom
     import pywintypes
@@ -624,6 +626,26 @@ def create_mail_in_dest(dest_folder, msg, raw_headers_text, tmpdir):
     return mail
 
 
+@com_retry()
+def import_native_msg_in_dest(ns, dest_folder, msg_path):
+    """
+    Open a standalone Outlook .msg file via MAPI OpenSharedItem, copy it,
+    and move the copy directly into dest_folder for 100% MAPI fidelity.
+    """
+    shared_item = ns.OpenSharedItem(os.path.abspath(msg_path))
+    try:
+        copied = shared_item.Copy()
+        moved = copied.Move(dest_folder)
+        moved.Save()
+        return moved
+    finally:
+        try:
+            shared_item.Close(1)  # 1 = olDiscard
+        except Exception:
+            pass
+        del shared_item
+
+
 def ensure_outlook_with_logon():
     """Start Outlook.Application and log on to the default MAPI profile."""
     pythoncom.CoInitialize()
@@ -885,6 +907,26 @@ def list_eml_files(root_dir):
     return files, total_bytes
 
 
+def estimate_source_bytes(src_path):
+    """Estimate total source bytes across a file, archive, or directory tree."""
+    lp = win_long_path(src_path)
+    if os.path.isfile(lp):
+        try:
+            return os.path.getsize(lp)
+        except OSError:
+            return 0
+    total = 0
+    for base, _, fnames in os.walk(lp):
+        for fn in fnames:
+            if fn.lower().endswith((".msf", ".dat", ".sqlite", ".json")):
+                continue
+            try:
+                total += os.path.getsize(os.path.join(base, fn))
+            except OSError:
+                pass
+    return total
+
+
 def main():
     for _stream in (sys.stdout, sys.stderr):
         if hasattr(_stream, "reconfigure"):
@@ -892,8 +934,13 @@ def main():
                 _stream.reconfigure(errors="replace")
             except Exception:
                 pass
-    ap = argparse.ArgumentParser(description="Import EML -> PST (Outlook/MAPI) with split & progress")
-    ap.add_argument("--src", required=True, help="Root folder containing .eml files (recursively)")
+    ap = argparse.ArgumentParser(
+        description=(
+            "Import EML, Apple Mail (.emlx/.mbox), Outlook (.msg/.olm), Maildir, "
+            "MH, MBOX, MMDF, Babyl, or compressed archives (.zip/.tgz/.gz) -> PST (Outlook/MAPI)"
+        )
+    )
+    ap.add_argument("--src", required=True, help="Source folder, mailbox file, or archive")
     ap.add_argument("--out-dir", required=True, help="Directory to write .pst files")
     ap.add_argument("--base-name", default="emails", help="Base name for PST files")
     ap.add_argument("--split-by", choices=["year"], default=None, help="Split by mail year (one PST per year)")
@@ -902,20 +949,20 @@ def main():
     ap.add_argument("--pst-root", default="Imported (EML)", help="Top folder name inside each PST (empty string for root)")
     ap.add_argument("--flatten", action="store_true", help="Do not replicate source subfolder structure inside PST")
     ap.add_argument("--overwrite-pst", action="store_true", help="Overwrite existing target PST files if present")
-    ap.add_argument("--include-deleted", action="store_true", help="Import messages marked expunged (0x0008) in X-Mozilla-Status")
+    ap.add_argument("--include-deleted", action="store_true", help="Import messages marked expunged/deleted")
     ap.add_argument("--flush-every", type=int, default=0, help="Detach/reattach PST every N items (0=off)")
     ap.add_argument("--count-every", type=int, default=200, help="Print folder Items.Count every N items (0=off)")
     args = ap.parse_args()
 
     src = os.path.normpath(args.src)
     out_dir = os.path.normpath(args.out_dir)
+    if not os.path.exists(win_long_path(src)):
+        print(f"Source path not found: {src}", file=sys.stderr)
+        sys.exit(1)
     os.makedirs(out_dir, exist_ok=True)
 
-    files, total_bytes = list_eml_files(src)
-    if not files:
-        print("No .eml files found.", file=sys.stderr)
-        sys.exit(1)
-    print(f"EML files: {len(files):,} | Total size: {total_bytes/1e9:,.2f} GB")
+    total_bytes = estimate_source_bytes(src)
+    print(f"Source: {src} | Estimated size: {total_bytes/1e9:,.2f} GB")
 
     app, ns = ensure_outlook_with_logon()
 
@@ -941,18 +988,11 @@ def main():
     current_pst = None
 
     try:
-        for (path, sz) in files:
+        for rec in iter_mail_records(src, include_deleted=True):
+            raw = rec.raw_bytes
+            sz = len(raw)
             processed += 1
             done_bytes += sz
-
-            # Read raw bytes & parse message
-            try:
-                with open(win_long_path(path), "rb") as f:
-                    raw = f.read()
-            except Exception as e:
-                print(f"\n[WARN] Could not read {path}: {e}")
-                skipped += 1
-                continue
 
             try:
                 msg = parser.parsebytes(raw)
@@ -960,7 +1000,7 @@ def main():
                 msg = parser.parsebytes(b"Subject: (no subject)\r\n\r\n")
 
             _, _, _, _, is_expunged = extract_message_flags(msg)
-            if is_expunged and not args.include_deleted:
+            if (rec.is_deleted or is_expunged) and not args.include_deleted:
                 skipped += 1
                 continue
 
@@ -976,31 +1016,38 @@ def main():
                 pass
 
             # Choose PST destination
-            store, root, pst_path = router.route(sz or len(raw), year)
+            store, root, pst_path = router.route(sz, year)
             if pst_path != current_pst:
                 current_pst = pst_path
                 print(f"\nCURRENT PST: {current_pst}")
 
-            rel_dir = "." if args.flatten else os.path.relpath(os.path.dirname(path), src)
+            rel_dir = "." if (args.flatten or not rec.folder_parts) else os.sep.join(rec.folder_parts)
             dest = get_or_create_folder_path(root, args.pst_root, rel_dir)
 
-            # Create item directly in destination folder, add attachments, save
+            # Create item directly in destination folder (or via OpenSharedItem for native .msg)
             try:
-                item = create_mail_in_dest(dest, msg, build_headers_text(raw), tmpdir)
-                item.Save()
+                item = None
+                if rec.native_msg_path and os.path.isfile(win_long_path(rec.native_msg_path)):
+                    try:
+                        item = import_native_msg_in_dest(ns, dest, rec.native_msg_path)
+                    except Exception:
+                        item = None
 
-                # Safety: ensure the item actually resides in the target folder
-                try:
-                    if item.Parent and item.Parent.EntryID != dest.EntryID:
-                        moved = item.Move(dest)
-                        moved.Save()
-                        del moved
-                except Exception:
-                    pass
+                if item is None:
+                    item = create_mail_in_dest(dest, msg, build_headers_text(raw), tmpdir)
+                    item.Save()
+                    try:
+                        if item.Parent and item.Parent.EntryID != dest.EntryID:
+                            moved = item.Move(dest)
+                            moved.Save()
+                            del moved
+                    except Exception:
+                        pass
+
                 del item
                 imported += 1
             except Exception as e:
-                print(f"\n[WARN] Failed to save item from {path}: {e}")
+                print(f"\n[WARN] Failed to save item from {rec.source_name}: {e}")
                 skipped += 1
 
             # Periodic live count
@@ -1022,17 +1069,21 @@ def main():
                     print(f"\n[WARN] Periodic flush failed: {e}")
 
             # Console progress & ETA
-            if processed % 100 == 0 or processed == len(files):
-                pct = (done_bytes / max(total_bytes, 1)) * 100.0
+            if processed % 100 == 0:
+                pct = min(100.0, (done_bytes / max(total_bytes, 1)) * 100.0)
                 elapsed = time.perf_counter() - start
                 rate = done_bytes / max(elapsed, 1e-9)
-                eta = (total_bytes - done_bytes) / max(rate, 1e-9)
+                eta = max(0.0, (total_bytes - done_bytes)) / max(rate, 1e-9)
                 h, m, s = int(eta // 3600), int(eta % 3600 // 60), int(eta % 60)
                 print(
-                    f"\r{processed:,}/{len(files):,} ({pct:7.3f}%) | "
+                    f"\rProcessed: {processed:,} ({pct:6.2f}%) | "
                     f"ETA {h:02d}:{m:02d}:{s:02d} | PST: {current_pst}",
                     end="",
                 )
+
+        if processed == 0:
+            print("No supported email messages found in source.", file=sys.stderr)
+            sys.exit(1)
 
         print("\nDone.")
         print(f"Processed: {processed:,} | Imported: {imported:,} | Skipped: {skipped:,}")
