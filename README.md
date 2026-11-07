@@ -50,15 +50,92 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-### Outlook Preparation Tips (for `.pst` input or output)
-1. Ensure classic desktop Outlook has a default mail profile configured that opens without modal prompts.
-2. Put Outlook in **Work Offline** mode while running large imports.
-3. Avoid browsing or moving items inside the target `.pst` in Outlook while the import is active.
-4. **Remove Outlook's 20 MB / 25 MB Attachment Size Limit**: By default, Outlook desktop rejects attaching files larger than 20–25 MB with error `(4096, "The file you're attaching is bigger than the server allows...")`. To lift this limit and allow unlimited attachment sizes in Outlook, run in PowerShell:
-   ```powershell
-   New-ItemProperty -Path "HKCU:\Software\Microsoft\Office\16.0\Outlook\Preferences" -Name "MaximumAttachmentSize" -Value 0 -PropertyType DWORD -Force
-   ```
-   *(Replace `16.0` with `15.0` for Outlook 2013 or `14.0` for Outlook 2010).*
+### System & Environment Preparation Tips (Windows & Outlook)
+
+To ensure maximum throughput, zero data loss, and uninterrupted multi-gigabyte migrations, apply the following Windows and Outlook environment preparations:
+
+#### 1. Enable Windows Long Path Support (`MAX_PATH` 260-char Bypass)
+By default, Windows enforces a legacy 260-character maximum path limit. Deeply nested mail trees (e.g. `Thunderbird/ImapMail/account/[Gmail]/...` or long message subjects) can exceed this. While `mail2mail` uses extended-length prefixes (`\\?\`) internally, enabling system-wide long paths prevents issues with third-party utilities, standard Python scripts, and Windows Explorer:
+```powershell
+# Run in PowerShell as Administrator:
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+```
+
+#### 2. Remove Outlook's 20 MB / 25 MB Attachment Size Limit
+By default, classic desktop Outlook rejects attaching files larger than 20–25 MB with error `(4096, "The file you're attaching is bigger than the server allows...")`. To lift this limit and allow unlimited attachment sizes in Outlook:
+```powershell
+# Set MaximumAttachmentSize to 0 (unlimited) in HKCU:
+New-ItemProperty -Path "HKCU:\Software\Microsoft\Office\16.0\Outlook\Preferences" -Name "MaximumAttachmentSize" -Value 0 -PropertyType DWORD -Force
+```
+*(Replace `16.0` with `15.0` for Outlook 2013 or `14.0` for Outlook 2010).*
+
+#### 3. Expand Outlook's 50 GB Single-PST Capacity Limit (Optional)
+Classic Outlook's default Unicode `.pst` format ceiling is 50 GB (warning at 47.5 GB, raising COM error `0x8004011D` when exceeded). If your migration targets a single large PST beyond 50 GB rather than using `--max-pst-gb 15` or `--split-by year`, expand the MAPI store limit (e.g. to 100 GB):
+```powershell
+$regPath = "HKCU:\Software\Microsoft\Office\16.0\Outlook\PST"
+New-Item -Path $regPath -Force | Out-Null
+# Set maximum size to 100 GB (102400 MB) and warning threshold to 95 GB (97280 MB):
+New-ItemProperty -Path $regPath -Name "MaxLargeFileSize" -Value 102400 -PropertyType DWORD -Force
+New-ItemProperty -Path $regPath -Name "WarnLargeFileSize" -Value 97280 -PropertyType DWORD -Force
+```
+
+#### 4. Add Real-Time Antivirus Folder Exclusion (Windows Defender)
+When migrating large mail archives (50,000–500,000+ `.eml` or `.msg` files), real-time antivirus scanning intercepts every file creation, reducing I/O throughput by 5× to 10×. Adding a temporary folder exclusion on your migration directory significantly boosts conversion speed:
+```powershell
+# Run in PowerShell as Administrator to exclude the migration workspace:
+Add-MpPreference -ExclusionPath "D:\Migration"
+```
+
+#### 5. Put Outlook in "Work Offline" Mode
+Before starting a large PST import, open Outlook and toggle **Send / Receive** -> **Work Offline**. This prevents background Exchange, Microsoft 365, or IMAP synchronization from competing for MAPI locks or slowing down COM automation calls.
+
+#### 6. Architecture (Bitness) Matching
+The Python interpreter's bitness must match your installed Microsoft Outlook's bitness:
+- **64-bit Python** -> **64-bit Outlook** (standard default on modern Windows 10/11 & Microsoft 365)
+- **32-bit Python** -> **32-bit Outlook** (older Click-to-Run or legacy Office installs)
+
+Verify your Python bitness in PowerShell:
+```powershell
+python -c "import struct; print(struct.calcsize('P') * 8)"
+```
+This value (32 or 64) must match Outlook's architecture under *File -> Office Account -> About Outlook*.
+
+---
+
+## Recommended Migration Workspace Structure
+
+For clean, auditable, and easily resumable conversions—especially on multi-gigabyte mailboxes—we recommend establishing a dedicated migration workspace (e.g. on a fast SSD drive `D:\Migration`):
+
+```text
+D:\Migration\
+├── 00_Source\                  <-- Raw source archives (Read-Only: Takeout .zip, .mbox, Thunderbird)
+│   ├── GoogleTakeout_Part1.zip
+│   ├── GoogleTakeout_Part2.zip
+│   ├── Thunderbird_Profile\
+│   └── OldArchive.olm
+│
+├── 01_Output_PST\              <-- Destination for generated Outlook .pst files
+│   ├── Mailbox_2022.pst
+│   ├── Mailbox_2023.pst
+│   └── Mailbox_2024.pst
+│
+├── 02_Output_EML\              <-- Destination for .eml hierarchies (when exporting to EML)
+│   └── [Folder Tree / YYYY / MM]
+│
+├── 03_Output_MBOX\             <-- Destination for .mbox / .mbox.gz backups
+│   └── AllMail.mbox.gz
+│
+└── 04_Audit_Logs\              <-- Chain-of-custody audit manifests and failure reports
+    ├── audit_manifest.csv      <-- Per-message SHA-256 hashes, timestamps, statuses
+    ├── failures.jsonl          <-- Machine-readable error logs (if any unparseable mail)
+    └── migration_ops.log       <-- Verbose operational console log mirror
+```
+
+**Why this structure is recommended:**
+- **Source Immutability**: Keeping raw sources in `00_Source` ensures original mail archives are never modified, deleted, or mixed with output data.
+- **Easy Antivirus Exclusion**: You can whitelist the single parent folder (`D:\Migration`) in Windows Defender without exposing other personal directories.
+- **Resumability & Audit Isolation**: Pointing `--resume` and `--audit-log` to `04_Audit_Logs\audit_manifest.csv` keeps migration state cleanly decoupled from data files, allowing seamless resumption after system restarts.
+- **I/O Performance Optimization**: High-throughput write folders (`01_Output_PST`, `02_Output_EML`) and scratch temp space can reside on a fast local NVMe SSD, while large static source files in `00_Source` can sit on higher-capacity secondary storage.
 
 ---
 
@@ -66,20 +143,20 @@ pip install -e .
 
 ### 1) Unified `mail2mail` CLI
 
-`mail2mail.py` dispatches to `mail2eml`, `mail2mbox`, or `mail2pst` either via subcommands (`eml`, `mbox`, `pst`), `--to {eml,mbox,pst}`, or automatically from the destination filename extension:
+`mail2mail.py` dispatches to `mail2eml`, `mail2mbox`, or `mail2pst` either via subcommands (`eml`, `mbox`, `pst`), `--to {eml,mbox,pst}`, or automatically inferred from the destination filename extension:
 
 ```cmd
 :: Convert any source -> Outlook PST
-python mail2mail.py pst "D:\Mail\ImapMail" "D:\PSTs\Mailbox.pst"
-python mail2mail.py "D:\Mail\export.olm" "D:\PSTs\MacMail.pst"
+python mail2mail.py pst "D:\Migration\00_Source\ImapMail" "D:\Migration\01_Output_PST\Mailbox.pst"
+python mail2mail.py "D:\Migration\00_Source\export.olm" "D:\Migration\01_Output_PST\MacMail.pst"
 
 :: Convert any source (including PST or EML) -> MBOX or compressed .mbox.gz
-python mail2mail.py mbox "D:\PSTs\MacMail.pst" "D:\Backups\MacMail.mbox.gz"
-python mail2mail.py "D:\Export_EML" "D:\Backups\AllMail.mbox"
+python mail2mail.py mbox "D:\Migration\01_Output_PST\MacMail.pst" "D:\Migration\03_Output_MBOX\MacMail.mbox.gz"
+python mail2mail.py "D:\Migration\02_Output_EML" "D:\Migration\03_Output_MBOX\AllMail.mbox"
 
 :: Convert any source (including PST or MBOX) -> EML hierarchy
-python mail2mail.py eml "D:\Mail\inbox.mbox.gz" "D:\Export_EML" --layout month
-python mail2mail.py "D:\PSTs\MacMail.pst" "D:\Export_EML"
+python mail2mail.py eml "D:\Migration\00_Source\inbox.mbox.gz" "D:\Migration\02_Output_EML" --layout month
+python mail2mail.py "D:\Migration\01_Output_PST\MacMail.pst" "D:\Migration\02_Output_EML"
 ```
 
 ---
@@ -90,7 +167,7 @@ python mail2mail.py "D:\PSTs\MacMail.pst" "D:\Export_EML"
 ```cmd
 python mail2eml.py ^
   "C:\Users\<User>\AppData\Roaming\Thunderbird\Profiles\xxx.default\ImapMail\imap.example.com" ^
-  "D:\Export_EML" ^
+  "D:\Migration\02_Output_EML" ^
   --layout folder ^
   --naming index
 ```
@@ -98,8 +175,8 @@ python mail2eml.py ^
 #### Organize by Year or Month with Date & Size Filters
 ```cmd
 python mail2eml.py ^
-  --src "D:\Mail\inbox.mbox.gz" ^
-  --out-dir "D:\Export_EML" ^
+  --src "D:\Migration\00_Source\inbox.mbox.gz" ^
+  --out-dir "D:\Migration\02_Output_EML" ^
   --layout month ^
   --start-year 2015 ^
   --end-year 2025 ^
@@ -119,6 +196,9 @@ python mail2eml.py ^
 - `--audit-log FILE`: Generate structured audit manifest (`.csv` or `.jsonl`) with message metadata and SHA-256 hashes.
 - `--error-log FILE`: Record machine-readable failure/warning entries (`.jsonl`).
 - `--log-file FILE`: Mirror all operations with timestamps into a persistent log file.
+- `--dedup [MODE]`: Deduplicate messages during migration (`auto`, `message-id`, or `sha256`; default: `none`).
+- `--resume [FILE]`: Resume an interrupted export, skipping messages already recorded with `status=SUCCESS` in an existing audit manifest.
+- `--no-gmail-labels`: Disable automatic Google Takeout `X-Gmail-Labels` folder hierarchy extraction.
 - `--dry-run`: Pre-flight inspection reporting folder counts, date ranges, and oversized attachments without writing to disk.
 - `-v` / `--verbose`: Enable verbose logging output.
 - `-q` / `--quiet`: Suppress live progress counters, printing only the final summary and errors.
@@ -129,14 +209,14 @@ python mail2eml.py ^
 
 #### Single `.mbox` or Compressed `.mbox.gz` Output
 ```cmd
-python mail2mbox.py "D:\Export_EML" "D:\Backups\AllMail.mbox"
-python mail2mbox.py "D:\PSTs\Archive.pst" "D:\Backups\Archive.mbox.gz"
+python mail2mbox.py "D:\Migration\02_Output_EML" "D:\Migration\03_Output_MBOX\AllMail.mbox"
+python mail2mbox.py "D:\Migration\01_Output_PST\Archive.pst" "D:\Migration\03_Output_MBOX\Archive.mbox.gz"
 ```
 
 #### Multi-File Folder or Year MBOX Tree
 ```cmd
-python mail2mbox.py "D:\Mail\ImapMail" "D:\Backups\MboxTree" --layout folder
-python mail2mbox.py "D:\Mail\ImapMail" "D:\Backups\ByYear" --layout year --max-mbox-gb 4
+python mail2mbox.py "D:\Migration\00_Source\ImapMail" "D:\Migration\03_Output_MBOX\MboxTree" --layout folder
+python mail2mbox.py "D:\Migration\00_Source\ImapMail" "D:\Migration\03_Output_MBOX\ByYear" --layout year --max-mbox-gb 4
 ```
 
 **Options (`mail2mbox.py`):**
@@ -150,6 +230,9 @@ python mail2mbox.py "D:\Mail\ImapMail" "D:\Backups\ByYear" --layout year --max-m
 - `--audit-log FILE`: Generate structured audit manifest (`.csv` or `.jsonl`) with message metadata and SHA-256 hashes.
 - `--error-log FILE`: Record machine-readable failure/warning entries (`.jsonl`).
 - `--log-file FILE`: Mirror all operations with timestamps into a persistent log file.
+- `--dedup [MODE]`: Deduplicate messages during migration (`auto`, `message-id`, or `sha256`; default: `none`).
+- `--resume [FILE]`: Resume an interrupted export, skipping messages already recorded with `status=SUCCESS` in an existing audit manifest.
+- `--no-gmail-labels`: Disable automatic Google Takeout `X-Gmail-Labels` folder hierarchy extraction.
 - `--dry-run`: Pre-flight inspection reporting folder counts, date ranges, and oversized attachments without writing to disk.
 - `-v` / `--verbose` & `-q` / `--quiet`: Control console output verbosity.
 
@@ -161,14 +244,14 @@ python mail2mbox.py "D:\Mail\ImapMail" "D:\Backups\ByYear" --layout year --max-m
 ```cmd
 python mail2pst.py ^
   "C:\Users\<User>\AppData\Roaming\Thunderbird\Profiles\xxx.default\ImapMail\imap.example.com" ^
-  "D:\PSTs\Mailbox.pst"
+  "D:\Migration\01_Output_PST\Mailbox.pst"
 ```
 
 #### Mode B: Split by Year (One PST per Year, Auto-Rotating at 15 GB)
 ```cmd
 python mail2pst.py ^
-  --src "D:\Export_EML" ^
-  --out-dir "D:\PSTs" ^
+  --src "D:\Migration\02_Output_EML" ^
+  --out-dir "D:\Migration\01_Output_PST" ^
   --base-name emails ^
   --split-by year ^
   --max-pst-gb 15 ^
@@ -180,8 +263,8 @@ python mail2pst.py ^
 #### Mode C: Even-Split into N PSTs by Total Size
 ```cmd
 python mail2pst.py ^
-  --src "D:\Export_EML" ^
-  --out-dir "D:\PSTs" ^
+  --src "D:\Migration\02_Output_EML" ^
+  --out-dir "D:\Migration\01_Output_PST" ^
   --base-name emails ^
   --splits 6 ^
   --max-pst-gb 18 ^
@@ -193,8 +276,8 @@ python mail2pst.py ^
 - `out` / `--out` / `--pst`: Output `.pst` file path (for single-PST mode).
 - `--out-dir DIR`: Output directory for multi-PST split/rotated mode.
 - `--base-name NAME`: Base filename prefix when using `--out-dir` (default: `emails`).
-- `--split-by year`: Create one PST per message year (`<base>_<YYYY>_part1.pst`).
-- `--splits N`: Divide total byte volume across `N` sequential PST files (`<base>_part1.pst`, …).
+- `--split-by year`: Create one PST per message year (`<base>_<YYYY>.pst`, rolling over to `<base>_<YYYY>_part2.pst` if exceeding `--max-pst-gb`).
+- `--splits N`: Divide total byte volume across `N` sequential PST files (`<base>.pst`, `<base>_part2.pst`, …).
 - `--max-pst-gb GB`: Maximum size in GB per PST before rotating to the next part (default: `15.0`).
 - `--pst-root NAME`: Top-level folder inside each PST (default: root `""` in single-PST mode, `"Imported (EML)"` in `--out-dir` mode).
 - `--flatten`: Place all messages directly inside `--pst-root` without recreating source subfolders.
@@ -221,7 +304,7 @@ python mail2pst.py ^
 ### 1) Pre-Flight Dry-Run Audit (`--dry-run`)
 Inspect a source mail file, folder, or multi-GB archive before performing any writes:
 ```cmd
-python mail2mail.py --dry-run "D:\Mail\GoogleTakeout.zip"
+python mail2mail.py --dry-run "D:\Migration\00_Source\GoogleTakeout.zip"
 ```
 Surfaces:
 - Total message count, payload size (GB/MB), and status breakdown (Read, Unread, Flagged, Deleted).
@@ -231,10 +314,10 @@ Surfaces:
 
 ### 2) Structured Audit Manifest (`--audit-log <manifest.csv | manifest.jsonl>`)
 Generates an audit trail of every evaluated message:
-- Fields: `timestamp`, `status` (`SUCCESS`, `SKIPPED_DATE`, `SKIPPED_DELETED`, `FAILED`), `message_id`, `subject`, `date`, `sender`, `recipients`, `source_folder`, `target_location`, `size_bytes`, `attachment_count`, and `sha256` digest for chain-of-custody verification.
+- Fields: `timestamp`, `status` (`SUCCESS`, `SKIPPED_DATE`, `SKIPPED_DELETED`, `SKIPPED_DUPLICATE`, `FAILED`), `message_id`, `subject`, `date`, `sender`, `recipients`, `source_folder`, `target_location`, `size_bytes`, `attachment_count`, and `sha256` digest for chain-of-custody verification.
 
 ```cmd
-python mail2mail.py pst "D:\Mail\ImapMail" "D:\PSTs\Mail.pst" --audit-log "D:\PSTs\audit.csv" --log-file "D:\PSTs\migration.log"
+python mail2mail.py pst "D:\Migration\00_Source\ImapMail" "D:\Migration\01_Output_PST\Mail.pst" --audit-log "D:\Migration\04_Audit_Logs\audit.csv" --log-file "D:\Migration\04_Audit_Logs\migration_ops.log"
 ```
 
 ### 3) Dedicated Failure Log (`--error-log <failures.jsonl>`)
@@ -243,13 +326,13 @@ Appends machine-readable JSON entries with exact message subjects, Message-IDs, 
 ### 4) In-Flight Deduplication (`--dedup {auto | message-id | sha256}`)
 Prevents importing duplicate messages when scanning multi-part archives (e.g. split Takeout `.zip` files) or merging multiple backup roots. Duplicates are tracked and logged in the manifest as `SKIPPED_DUPLICATE`:
 ```cmd
-python mail2mail.py pst "D:\Takeout_Parts" "D:\PSTs\Unified.pst" --dedup auto
+python mail2mail.py pst "D:\Migration\00_Source\Takeout_Parts" "D:\Migration\01_Output_PST\Unified.pst" --dedup auto
 ```
 
 ### 5) Resuming Interrupted Migrations (`--resume [manifest]`)
 Large migrations (hundreds of gigabytes) can be resumed after system reboots or power interruptions without duplicating already-imported records. `--resume` reads existing `SUCCESS` entries from the audit manifest and skips them on the next run:
 ```cmd
-python mail2mail.py pst "D:\LargeMailbox" "D:\PSTs\Mailbox.pst" --audit-log "D:\PSTs\audit.csv" --resume
+python mail2mail.py pst "D:\Migration\00_Source\LargeMailbox" "D:\Migration\01_Output_PST\Mailbox.pst" --audit-log "D:\Migration\04_Audit_Logs\audit.csv" --resume
 ```
 
 ---
