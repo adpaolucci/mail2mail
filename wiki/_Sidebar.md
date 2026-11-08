@@ -17,7 +17,16 @@
 
 ### ⚙️ Engineering & Client Tuning
 * **[Migration Best Practices](Migration-Best-Practices-and-Tuning)**
+* **[Cross-Engine Compatibility](Cross-Engine-Compatibility-and-Checkpoints)**
+
+---
+
+### 🔬 Binary Specs & Formats
+* **[MAPI & CFBF Specifications](MAPI-and-CFBF-Binary-Specifications)**
+* **[PST Internals & Auto-Splitting](PST-Internals-and-Capacity-Splitting)**
+* **[Mac Mail Formats (EMLX & OLM)](Mac-Mail-Formats-EMLX-and-OLM)**
 * **[Format Conversion Matrix](Mailbox-Format-Conversion-Matrix)**
+* **[Forensic Auditing & Custody](Forensic-Auditing-and-Chain-of-Custody)**
 
 ---
 

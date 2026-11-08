@@ -1,6 +1,6 @@
 # Mailbox Migration & Protocol Engineering Wiki
 
-Welcome to the **Mailbox Migration & Protocol Engineering Wiki**. This knowledge base provides comprehensive documentation on email protocols, server-side throttling behaviors, public provider rate limits, dedicated export endpoints, and optimal migration strategies for tools like [`mail2rust`](https://github.com/adpaolucci/mail2rust) and [`mail2mail`](https://github.com/adpaolucci/mail2mail).
+Welcome to the **Mailbox Migration & Protocol Engineering Wiki**. This knowledge base provides comprehensive technical documentation on email protocols, server-side throttling behaviors, public provider rate limits, dedicated export endpoints, forensic auditing, and internal binary specifications across [`mail2rust`](https://github.com/adpaolucci/mail2rust) and [`mail2mail`](https://github.com/adpaolucci/mail2mail).
 
 ---
 
@@ -17,7 +17,14 @@ Welcome to the **Mailbox Migration & Protocol Engineering Wiki**. This knowledge
 
 ### 3. Engineering & Client Tuning
 * **[[Migration-Best-Practices-and-Tuning]]**: Algorithmic mitigation strategies, adaptive exponential backoff, concurrency clamping, UID range paging, and non-destructive inspection (`BODY.PEEK[]`).
-* **[[Mailbox-Format-Conversion-Matrix]]**: Format conversion, structure validation, and mapping between PST, OST, MBOX, EML, EMLX, MSG, Maildir, and JMAP.
+* **[[Cross-Engine-Compatibility-and-Checkpoints]]**: The decoupled interoperability contract, JSON checkpoints, SQLite WAL state cache, and test harness parity between Python and Rust.
+
+### 4. Binary Specifications & Format Internals
+* **[[MAPI-and-CFBF-Binary-Specifications]]**: Microsoft Compound File Binary Format ([MS-CFB]), Outlook `.msg` ([MS-OXMSG]), and MAPI property tag specifications without requiring Windows DLLs.
+* **[[PST-Internals-and-Capacity-Splitting]]**: Unicode vs ANSI PST architecture, overcoming Outlook's 50 GB administrative ceiling, and dynamic volume auto-splitting (`--split-size`).
+* **[[Mac-Mail-Formats-EMLX-and-OLM]]**: Structural analysis and extraction of Apple Mail `.emlx` (length prefix + MIME + XML plist trailer) and Outlook for Mac `.olm` ZIP archives.
+* **[[Mailbox-Format-Conversion-Matrix]]**: Direct conversion matrix, property mappings, and multi-mailbox merging across PST, OST, MBOX, EML, EMLX, MSG, Maildir, and JMAP.
+* **[[Forensic-Auditing-and-Chain-of-Custody]]**: Cryptographic SHA-256 verification manifests, tamper-evident audit logs (`--audit-log`), and RFC 5322 normalization.
 
 ---
 
@@ -31,22 +38,3 @@ Welcome to the **Mailbox Migration & Protocol Engineering Wiki**. This knowledge
 | **Apple iCloud** | `imap.mail.me.com:993` | ~2 sockets safely | Heuristic bandwidth throttle | **Apple Privacy Export** or **macOS `~/Library/Mail/V10/` (`.emlx`)** |
 | **Fastmail** | `imap.fastmail.com:993` | Adaptive | 500 logins / 10 minutes | **JMAP API** (`https://api.fastmail.com/jmap/api/`) |
 | **Proton Mail** | `127.0.0.1:1143` *(Bridge)* | Unlimited (local) | Local GPG decryption CPU bound | **Proton Mail Export Tool** or Local Bridge with concurrency $\le 4$ |
-
----
-
-## 🛠️ Deploying this Wiki to GitHub
-To publish this documentation to your repository's official GitHub Wiki:
-1. Navigate to your GitHub repository and click the **Wiki** tab.
-2. Click **Create the first page** and save a dummy page to initialize the Git wiki repository.
-3. Clone the wiki repository locally:
-   ```bash
-   git clone https://github.com/<owner>/<repo>.wiki.git
-   ```
-4. Copy all `.md` files from this `wiki/` directory into that clone and push:
-   ```bash
-   cp wiki/*.md <repo>.wiki/
-   cd <repo>.wiki
-   git add .
-   git commit -m "Publish Mailbox Migration & Protocol Engineering Wiki"
-   git push origin master
-   ```
