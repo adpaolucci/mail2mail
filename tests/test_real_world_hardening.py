@@ -128,6 +128,22 @@ class TestRealWorldHardening(unittest.TestCase):
         self.assertEqual(parts, ["Inbox"])
         self.assertFalse(flags["is_read"])
 
+        # 6. Quoted labels containing commas
+        parts, flags = parse_gmail_labels('"Clients, VIP",Starred')
+        self.assertEqual(parts, ["Clients, VIP"])
+        self.assertTrue(flags["is_flagged"])
+
+        # 7. ReDoS resistance (CWE-1333): adversarial escaped string completes instantaneously
+        adversarial_payload = '"' + r'\!' * 2000 + '"'
+        parts, _ = parse_gmail_labels(adversarial_payload)
+        self.assertIsInstance(parts, list)
+
+        # 8. Empty / whitespace fallback
+        parts, _ = parse_gmail_labels("")
+        self.assertEqual(parts, ["Inbox"])
+        parts, _ = parse_gmail_labels("   ")
+        self.assertEqual(parts, ["Inbox"])
+
     def test_takeout_mbox_gmail_labels_routing(self):
         mbox_path = os.path.join(self.tmpdir, "All mail Including Spam and Trash.mbox")
         with open(mbox_path, "wb") as f:

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import bz2
+import csv
 import email
 import email.utils
 import gzip
@@ -412,10 +413,13 @@ def parse_gmail_labels(header_val: str) -> Tuple[List[str], Dict[str, bool]]:
       'Sent,Important' -> (['Sent Items'], ...)
       'Trash' -> (['Deleted Items'], {'is_deleted': True, ...})
     """
-    if not header_val:
+    if not header_val or not header_val.strip():
         return ["Inbox"], default_flags()
 
-    raw_labels = [p.strip().strip('"') for p in re.findall(r'(?:[^,"]|"(?:\\.|[^"])*")+', header_val)]
+    try:
+        raw_labels = [p.strip().strip('"') for p in next(csv.reader(io.StringIO(header_val), skipinitialspace=True))]
+    except Exception:
+        raw_labels = [p.strip().strip('"') for p in header_val.split(",")]
     raw_labels = [l for l in raw_labels if l]
 
     is_flagged = any(l.lower() == "starred" for l in raw_labels)
