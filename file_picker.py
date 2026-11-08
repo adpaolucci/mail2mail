@@ -50,12 +50,118 @@ CSV_SAVE_FILETYPES: List[Tuple[str, str]] = [
 ]
 
 
+def _is_headless() -> bool:
+    """Return True if running in a headless CI/test environment without an active desktop display."""
+    if os.environ.get("HEADLESS") or os.environ.get("CI"):
+        return True
+    if sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return True
+    return False
+
+
 def _tkinter_available() -> bool:
+    if _is_headless():
+        return False
     try:
         import tkinter
         return True
-    except ImportError:
+    except Exception:
         return False
+
+
+def _tk_pick_open_file(
+    title: str,
+    filetypes: List[Tuple[str, str]],
+    multiple: bool,
+    initialdir: Optional[str],
+) -> Optional[Union[str, List[str]]]:
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+
+    kw = {"title": title, "filetypes": filetypes}
+    if initialdir and os.path.exists(initialdir):
+        kw["initialdir"] = initialdir
+
+    try:
+        if multiple:
+            selected = filedialog.askopenfilenames(parent=root, **kw)
+            return [os.path.normpath(p) for p in selected] if selected else None
+        else:
+            selected = filedialog.askopenfilename(parent=root, **kw)
+            return os.path.normpath(selected) if selected else None
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+
+def _tk_pick_folder(title: str, initialdir: Optional[str]) -> Optional[str]:
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+
+    kw = {"title": title}
+    if initialdir and os.path.exists(initialdir):
+        kw["initialdir"] = initialdir
+
+    try:
+        selected = filedialog.askdirectory(parent=root, **kw)
+        return os.path.normpath(selected) if selected else None
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+
+def _tk_pick_save_file(
+    title: str,
+    default_ext: str,
+    filetypes: List[Tuple[str, str]],
+    initialfile: str,
+    initialdir: Optional[str],
+) -> Optional[str]:
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+
+    kw = {
+        "title": title,
+        "defaultextension": default_ext,
+        "filetypes": filetypes,
+        "initialfile": initialfile,
+    }
+    if initialdir and os.path.exists(initialdir):
+        kw["initialdir"] = initialdir
+
+    try:
+        selected = filedialog.asksaveasfilename(parent=root, **kw)
+        return os.path.normpath(selected) if selected else None
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
 
 
 def _powershell_pick_file(
@@ -181,37 +287,12 @@ def pick_open_file(
 
     if _tkinter_available():
         try:
-            import tkinter as tk
-            from tkinter import filedialog
-
-            root = tk.Tk()
-            root.withdraw()
-            try:
-                root.attributes("-topmost", True)
-            except Exception:
-                pass
-
-            kw = {"title": title, "filetypes": filetypes}
-            if initialdir and os.path.exists(initialdir):
-                kw["initialdir"] = initialdir
-
-            if multiple:
-                selected = filedialog.askopenfilenames(parent=root, **kw)
-                root.destroy()
-                if selected:
-                    return [os.path.normpath(p) for p in selected]
-                return None
-            else:
-                selected = filedialog.askopenfilename(parent=root, **kw)
-                root.destroy()
-                if selected:
-                    return os.path.normpath(selected)
-                return None
+            return _tk_pick_open_file(title=title, filetypes=filetypes, multiple=multiple, initialdir=initialdir)
         except Exception:
             pass
 
     # Windows PowerShell fallback
-    if sys.platform == "win32":
+    if sys.platform == "win32" and not _is_headless():
         filter_parts = []
         for desc, exts in filetypes:
             filter_parts.append(f"{desc}|{exts}")
@@ -235,29 +316,11 @@ def pick_folder(
     """
     if _tkinter_available():
         try:
-            import tkinter as tk
-            from tkinter import filedialog
-
-            root = tk.Tk()
-            root.withdraw()
-            try:
-                root.attributes("-topmost", True)
-            except Exception:
-                pass
-
-            kw = {"title": title}
-            if initialdir and os.path.exists(initialdir):
-                kw["initialdir"] = initialdir
-
-            selected = filedialog.askdirectory(parent=root, **kw)
-            root.destroy()
-            if selected:
-                return os.path.normpath(selected)
-            return None
+            return _tk_pick_folder(title=title, initialdir=initialdir)
         except Exception:
             pass
 
-    if sys.platform == "win32":
+    if sys.platform == "win32" and not _is_headless():
         res = _powershell_pick_folder(title=title, initialdir=initialdir)
         if res:
             return os.path.normpath(res)
@@ -288,34 +351,17 @@ def pick_save_file(
 
     if _tkinter_available():
         try:
-            import tkinter as tk
-            from tkinter import filedialog
-
-            root = tk.Tk()
-            root.withdraw()
-            try:
-                root.attributes("-topmost", True)
-            except Exception:
-                pass
-
-            kw = {
-                "title": title,
-                "defaultextension": default_ext,
-                "filetypes": filetypes,
-                "initialfile": initialfile,
-            }
-            if initialdir and os.path.exists(initialdir):
-                kw["initialdir"] = initialdir
-
-            selected = filedialog.asksaveasfilename(parent=root, **kw)
-            root.destroy()
-            if selected:
-                return os.path.normpath(selected)
-            return None
+            return _tk_pick_save_file(
+                title=title,
+                default_ext=default_ext,
+                filetypes=filetypes,
+                initialfile=initialfile,
+                initialdir=initialdir,
+            )
         except Exception:
             pass
 
-    if sys.platform == "win32":
+    if sys.platform == "win32" and not _is_headless():
         filter_parts = []
         for desc, exts in filetypes:
             filter_parts.append(f"{desc}|{exts}")
