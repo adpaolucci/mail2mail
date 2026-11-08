@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mail2mail"
-version = "2.2.0"
+version = "2.3.0"
 description = "Universal Email & Mailbox Converter (MBOX, Thunderbird ImapMail/Mail, Maildir/Maildir++, Apple Mail .emlx/.mbox, Outlook .msg/.olm/.pst, MH, MMDF, Babyl, EML, and compressed archives <-> EML, MBOX, or Outlook PST)"
 readme = "README.md"
 license = "MIT"

@@ -111,7 +111,8 @@ def _print_top_help() -> None:
         "  mbox (or mail2mbox)   Convert any supported mail source into .mbox / .mbox.gz files\n"
         "  pst  (or mail2pst)    Convert/import any supported mail source into Outlook .pst file(s)\n"
         "  jmap (or mail2jmap)   Ingest live Fastmail or RFC 8620/8621 JMAP servers into PST, MBOX, or EML\n"
-        "  mcp  (or mail2mcp)    Run Model Context Protocol (MCP) JSON-RPC stdio server for AI agents\n\n"
+        "  mcp  (or mail2mcp)    Run Model Context Protocol (MCP) JSON-RPC stdio server for AI agents\n"
+        "  pick (or --pick)      Launch native host OS file/folder pickers interactively\n\n"
         "Run `mail2mail eml --help`, `mail2mail mbox --help`, `mail2mail pst --help`, or `mail2mail jmap --help` for full options."
     )
 
@@ -125,6 +126,8 @@ def _infer_mode(argv: List[str]) -> Tuple[str, List[str]]:
         return "help", argv
 
     first = argv[0].lower()
+    if first in ("pick", "to-pick", "browse", "--pick", "--browse"):
+        return "pick", argv[1:]
     if first in ("eml", "to-eml", "mail2eml"):
         return "eml", argv[1:]
     if first in ("mbox", "to-mbox", "mail2mbox"):
@@ -203,6 +206,52 @@ def _infer_mode(argv: List[str]) -> Tuple[str, List[str]]:
     return "eml", cleaned
 
 
+def _run_interactive_pick(argv: List[str]) -> None:
+    import file_picker
+
+    print("\n--- Mail2Mail Interactive Host OS Picker ---")
+    src = file_picker.pick_source("Select Source Mail Archive File or Directory")
+    if not src:
+        print("Cancelled: No source selected.", file=sys.stderr)
+        return
+    print(f"Selected source: {src}")
+
+    print("\nChoose conversion destination format:")
+    print("  [1] Microsoft Outlook PST (.pst)")
+    print("  [2] Standard MBOX (.mbox)")
+    print("  [3] EML Directory Hierarchy (.eml)")
+    try:
+        fmt_choice = input("Choice [1/2/3] (default: 1): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+
+    if fmt_choice == "2":
+        dest = file_picker.pick_save_file(
+            title="Select Destination MBOX File", default_ext=".mbox", initialfile="output.mbox"
+        )
+        if not dest:
+            print("Cancelled: No destination selected.", file=sys.stderr)
+            return
+        import mail2mbox
+        mail2mbox.main([src, dest] + argv, prog="mail2mail mbox")
+    elif fmt_choice == "3":
+        dest = file_picker.pick_folder(title="Select Destination EML Directory")
+        if not dest:
+            print("Cancelled: No destination selected.", file=sys.stderr)
+            return
+        import mail2eml
+        mail2eml.main([src, dest] + argv, prog="mail2mail eml")
+    else:
+        dest = file_picker.pick_save_file(
+            title="Select Destination Outlook PST File", default_ext=".pst", initialfile="output.pst"
+        )
+        if not dest:
+            print("Cancelled: No destination selected.", file=sys.stderr)
+            return
+        import mail2pst
+        mail2pst.main([src, dest] + argv, prog="mail2mail pst")
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     for _stream in (sys.stdout, sys.stderr):
         if hasattr(_stream, "reconfigure"):
@@ -219,7 +268,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         return
 
     try:
-        if mode == "pst":
+        if mode == "pick":
+            _run_interactive_pick(forwarded)
+        elif mode == "pst":
             import mail2pst
             mail2pst.main(forwarded, prog="mail2mail pst")
         elif mode == "mbox":

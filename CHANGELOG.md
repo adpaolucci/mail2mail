@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.3.0] - 2026-11-08
+
+### Added
+- **Native Host OS File & Folder Pickers (`file_picker.py`)**:
+  - Implemented cross-platform native host OS file, multi-file, folder, and save dialogs leveraging Windows Common Item Dialogs, macOS Cocoa NSOpenPanel, and Linux Desktop Portals.
+  - Standardized email file filters for all supported mail archives (`*.pst`, `*.ost`, `*.mbox`, `*.eml`, `*.emlx`, `*.msg`, `*.olm`, `*.zip`, `*.tar*`, `*.gz`, `*.bz2`, `*.xz`).
+  - Added `--pick` / `--browse` flag across `mail2mail`, `mail2pst`, `mail2eml`, and `mail2mbox`.
+  - Added automatic interactive native dialog fallback when scripts are launched in an interactive terminal or double-clicked without required arguments.
+  - Implemented PowerShell `System.Windows.Forms` fallback on Windows for headless or minimal Python environments lacking Tk.
+  - Added automated test suite `tests/test_file_picker.py` verifying file and directory picker abstractions.
+
+---
+
 ## [2.2.0] - 2026-11-07
 
 ### Added

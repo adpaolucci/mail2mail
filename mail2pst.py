@@ -1003,6 +1003,7 @@ def build_arg_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
     ap.add_argument("--end-year", type=int, default=None, help="Import messages up to this year (inclusive)")
     ap.add_argument("--overwrite-pst", action="store_true", help="Overwrite existing target PST files if present")
     ap.add_argument("--include-deleted", action="store_true", help="Import messages marked expunged/deleted")
+    ap.add_argument("--pick", "--browse", action="store_true", help="Launch native host OS file/folder picker dialogs to select source and/or destination")
     ap.add_argument("--flush-every", type=int, default=5000, help="Detach/reattach PST every N items to release COM memory (default: 5000, 0=off)")
     ap.add_argument("--count-every", type=int, default=200, help="Print folder Items.Count every N items (0=off)")
     ap.add_argument(
@@ -1052,7 +1053,15 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
 
     src = args.src_opt or args.src_pos
     if not src:
-        ap.error("A source path (positional or --src) is required.")
+        if getattr(args, "pick", False) or (sys.stdin.isatty() and (argv is None or not argv)):
+            import file_picker
+            print("Launching native host OS picker for source mail file or directory...")
+            src = file_picker.pick_source("Select Source Mail File or Directory")
+            if not src:
+                print("Operation cancelled: No source selected.", file=sys.stderr)
+                sys.exit(0)
+        else:
+            ap.error("A source path (positional or --src) is required. (Hint: use --pick to select via native file dialog)")
 
     src = os.path.normpath(src)
     if not os.path.exists(win_long_path(src)):
@@ -1071,7 +1080,20 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
 
     target = args.out_pst or args.out_dir or args.out_pos
     if not target:
-        ap.error("Both a source path (positional or --src) and an output target (positional, --out, or --out-dir) are required.")
+        if getattr(args, "pick", False) or (sys.stdin.isatty() and (argv is None or not argv)):
+            import file_picker
+            print("Launching native host OS picker for target PST file...")
+            target = file_picker.pick_save_file(
+                title="Select Destination Outlook PST File",
+                default_ext=".pst",
+                initialfile="output.pst",
+            )
+            if not target:
+                print("Operation cancelled: No target selected.", file=sys.stderr)
+                sys.exit(0)
+            args.out_pst = target
+        else:
+            ap.error("Both a source path (positional or --src) and an output target (positional, --out, or --out-dir) are required. (Hint: use --pick to select via native file dialog)")
 
     # Determine whether target is a specific .pst file or an output directory
     single_pst_path: Optional[str] = None

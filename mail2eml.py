@@ -549,6 +549,7 @@ def build_arg_parser(prog: Optional[str] = None) -> argparse.ArgumentParser:
     ap.add_argument("--audit-log", help="Path to write structured audit manifest (.csv or .jsonl)")
     ap.add_argument("--error-log", help="Path to write structured failure report (.jsonl)")
     ap.add_argument("--log-file", help="Path to write persistent operational log file")
+    ap.add_argument("--pick", "--browse", action="store_true", help="Launch native host OS file/folder picker dialogs to select source and/or destination")
     ap.add_argument("--dry-run", action="store_true", help="Perform pre-flight inspection and report without modifying disk")
     ap.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     ap.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output, show only summary and errors")
@@ -568,7 +569,15 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
 
     src = args.src_opt or args.src_pos
     if not src:
-        ap.error("A source path (positional or --src/--mbox) is required.")
+        if getattr(args, "pick", False) or (sys.stdin.isatty() and (argv is None or not argv)):
+            import file_picker
+            print("Launching native host OS picker for source mail file or directory...")
+            src = file_picker.pick_source("Select Source Mail File or Directory")
+            if not src:
+                print("Operation cancelled: No source selected.", file=sys.stderr)
+                sys.exit(0)
+        else:
+            ap.error("A source path (positional or --src/--mbox) is required. (Hint: use --pick to select via native file dialog)")
 
     src_path = os.path.normpath(src)
     if not os.path.exists(win_long_path(src_path)):
@@ -581,7 +590,16 @@ def main(argv: Optional[List[str]] = None, prog: Optional[str] = None) -> None:
 
     out_dir = args.out_opt or args.out_pos
     if not out_dir:
-        ap.error("Both a source path (positional or --src/--mbox) and destination (--out-dir) are required.")
+        if getattr(args, "pick", False) or (sys.stdin.isatty() and (argv is None or not argv)):
+            import file_picker
+            print("Launching native host OS folder picker for destination EML directory...")
+            out_dir = file_picker.pick_folder(title="Select Destination EML Directory")
+            if not out_dir:
+                print("Operation cancelled: No destination directory selected.", file=sys.stderr)
+                sys.exit(0)
+            args.out_opt = out_dir
+        else:
+            ap.error("Both a source path (positional or --src/--mbox) and destination (--out-dir) are required. (Hint: use --pick to select via native file dialog)")
 
     out_root = os.path.normpath(out_dir)
 
