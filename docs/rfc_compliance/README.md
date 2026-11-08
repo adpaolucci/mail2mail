@@ -34,12 +34,19 @@ This directory documents the IETF RFCs, Microsoft Open Specifications, and de-fa
    - **[MS-OXPROPS] & [MS-OXCMSG]** (MAPI Property Tags, DASL Schemas, `PT_SYSTIME` UTC `VT_DATE`, Verb & Icon Indices, MHTML `PR_ATTACH_FLAGS`)
    - **Outlook for Mac `.olm`** (`com.microsoft.__Messages` XML Schema & ZIP Archive Structure)
 
+4. **[`RFC8620_RFC8621_JMAP.md`](../../docs/rfc_compliance/RFC8620_RFC8621_JMAP.md)**
+   - **RFC 8620** (The JSON Meta Application Protocol / JMAP Core — Session Resource, JSON RPC Batching, Bearer Token Auth)
+   - **RFC 8621** (JMAP for Mail — Mailboxes, Emails, Keywords `$seen` / `$flagged` / `$answered`, Threads, and Body Values)
+   - **Fastmail & Modern Mail Server Interoperability** (Fastmail, Stalwart, Apache James, Cyrus)
+   - **Bi-directional Field & Keyword Mapping** to RFC 5322 MIME and Outlook MAPI Properties
+
 ---
 
 ## Master Standards Compliance Matrix
 
 | Standard / Specification | Scope | Primary Implementation | Automated Test Coverage |
 | :--- | :--- | :--- | :--- |
+| **RFC 8620 & RFC 8621** | JMAP Core protocol, session discovery, Mailbox/get, Email/get, JSON bodies | [`JmapClient`](../../mail2jmap.py), [`iter_jmap_records`](../../mail_formats.py) | [`tests/test_jmap.py`](../../tests/test_jmap.py) |
 | **RFC 5322** | Internet Message Format headers, dates, addresses, folding | [`safe_get_header`](../../mail_formats.py#L246-L264), [`safe_get_all_headers`](../../mail_formats.py#L267-L283), [`addresses_to_str`](../../mail2pst.py#L138-L160) | [`tests/test_rfc_compliance.py`](../../tests/test_rfc_compliance.py) |
 | **RFC 2045 / 2046** | MIME multipart bodies, `base64` / `quoted-printable` decoding | [`pick_body`](../../mail2pst.py#L229-L265), [`add_attachments`](../../mail2pst.py#L266-L365) | [`tests/test_rfc_compliance.py`](../../tests/test_rfc_compliance.py) |
 | **RFC 2047** | Encoded-word headers (`=?charset?B/Q?...?=`) | [`decode_mime_words`](../../mail_formats.py#L236-L243) | [`tests/test_rfc_compliance.py`](../../tests/test_rfc_compliance.py) |

@@ -1923,6 +1923,16 @@ def _sniff_stream_format(header_bytes: bytes) -> str:
         return "mmdf"
     if header_bytes.lstrip().startswith(b"BABYL OPTIONS:"):
         return "babyl"
+    trimmed = header_bytes.lstrip()
+    if (trimmed.startswith(b"{") or trimmed.startswith(b"[")) and (
+        b'"using"' in trimmed
+        or b'"methodResponses"' in trimmed
+        or b'"methodCalls"' in trimmed
+        or b'"mailboxIds"' in trimmed
+        or b'"threadId"' in trimmed
+        or b'"bodyValues"' in trimmed
+    ):
+        return "jmap"
     first_nl = header_bytes.find(b"\n")
     if first_nl != -1 and header_bytes[:first_nl].strip().isdigit():
         return "emlx"
@@ -1992,6 +2002,14 @@ def _iter_records_from_bytes(
                 folder_parts,
                 include_deleted=include_deleted,
             )
+            return
+        except Exception:
+            pass
+
+    if low.endswith((".jmap", ".jmap.json")) or fmt == "jmap":
+        try:
+            import mail2jmap
+            yield from mail2jmap.iter_jmap_records(data, folder_parts, include_deleted=include_deleted)
             return
         except Exception:
             pass
@@ -2248,10 +2266,30 @@ def iter_file_records(
 
     fname = os.path.basename(file_path)
     low = fname.lower()
-    if low in THUNDERBIRD_SKIP_FILES or low.endswith(THUNDERBIRD_SKIP_SUFFIXES):
+
+    if low.endswith((".jmap", ".jmap.json")):
+        is_jmap_file = True
+    elif low.endswith(".json"):
+        try:
+            with open(lp, "rb") as test_fp:
+                is_jmap_file = _sniff_stream_format(test_fp.read(4096)) == "jmap"
+        except OSError:
+            is_jmap_file = False
+    else:
+        is_jmap_file = False
+
+    if not is_jmap_file and (low in THUNDERBIRD_SKIP_FILES or low.endswith(THUNDERBIRD_SKIP_SUFFIXES)):
         return
 
     default_folder = list(folder_parts) if folder_parts is not None else [clean_folder_segment(os.path.splitext(fname)[0] or "Inbox")]
+
+    if is_jmap_file:
+        try:
+            import mail2jmap
+            yield from mail2jmap.iter_jmap_records(lp, folder_parts, include_deleted=include_deleted)
+            return
+        except Exception:
+            pass
 
     if low.endswith(".pst"):
         yield from iter_pst_records(file_path, folder_parts or [], include_deleted=include_deleted)
@@ -2307,6 +2345,14 @@ def iter_file_records(
     if fmt == "pst":
         yield from iter_pst_records(file_path, folder_parts or [], include_deleted=include_deleted)
         return
+
+    if low.endswith((".jmap", ".jmap.json")) or fmt == "jmap":
+        try:
+            import mail2jmap
+            yield from mail2jmap.iter_jmap_records(lp, default_folder, include_deleted=include_deleted)
+            return
+        except Exception:
+            pass
 
     if fmt == "zip":
         yield from iter_zip_or_olm_records(lp, folder_parts or [], include_deleted=include_deleted, parse_gmail=parse_gmail)

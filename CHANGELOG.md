@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.2.0] - 2026-11-07
 
 ### Added
+- **Fastmail & JMAP (RFC 8620 / RFC 8621) Native Client & Specification (`mail2jmap.py`, `mail2mail jmap`)**:
+  - Implemented pure-Python, zero-third-party-dependency JMAP client supporting Fastmail and standard JMAP servers (Stalwart, Apache James, Cyrus).
+  - Implemented automatic JMAP session discovery (`/jmap/session`), mailbox listing (`Mailbox/get`), email ID querying (`Email/query`), and batch email item retrieval (`Email/get`).
+  - Added direct mapping of JMAP JSON payloads (including keywords `$seen`, `$flagged`, `$answered`, `$draft`, threads, and structured body values) to unified `MailRecord` and `EmailMessage` models.
+  - Added CLI subcommand `mail2jmap` / `mail2mail jmap --token <token> --out <dest>` with folder filtering and incremental delta sync checkpointing.
+  - Added automatic sniffing and ingestion of static `.jmap` and `.jmap.json` backup files in `mail_formats.py`.
+  - Added comprehensive RFC compliance specification in `docs/rfc_compliance/RFC8620_RFC8621_JMAP.md` and automated test suite in `tests/test_jmap.py`.
 - **Graceful Interruption, Pause/Resume & Signal Handling (`mail_shutdown.py`)**:
   - Coordinates graceful stops across all tools on `SIGINT` (Ctrl+C), `SIGTERM`, and `SIGBREAK` (Windows Console Break).
   - Traps interruption signals, finishes writing the active in-flight message cleanly, commits all batched state, unmounts all Outlook PST stores, and flushes audit logs.

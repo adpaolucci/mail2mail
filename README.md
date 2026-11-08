@@ -313,6 +313,31 @@ python mail2pst.py ^
 - `--dry-run`: Pre-flight inspection reporting folder counts, date ranges, and oversized attachments without writing to disk/PST.
 - `-v` / `--verbose` & `-q` / `--quiet`: Control console output verbosity.
 
+### 5) Fastmail & Modern JMAP RFC 8620/8621 Ingestion (`mail2jmap.py` or `mail2mail jmap`)
+Directly ingest email from **Fastmail** or any RFC 8620/8621 compliant JMAP server (Stalwart, Apache James, Cyrus) using standard API Bearer tokens:
+
+```bash
+# Ingest entire Fastmail account into an Outlook PST
+python mail2jmap.py --token "fmu1-xxxx-xxxx" --out "D:\PSTs\Fastmail.pst"
+
+# Sync specific folders into a compressed MBOX file with incremental checkpointing
+python mail2jmap.py --token "fmu1-xxxx-xxxx" --folders "Inbox,Archive" --checkpoint "fastmail_sync.json" --out "fastmail.mbox.gz"
+
+# Unified CLI invocation
+mail2mail jmap --token "fmu1-xxxx-xxxx" --out "fastmail_backup.pst"
+
+# Ingest static exported .jmap or .jmap.json backup files
+mail2mail eml "fastmail_export.jmap" "D:\Export_EML"
+```
+
+Key JMAP Capabilities:
+- **Zero Third-Party Dependencies**: Native Python client using standard library `urllib.request` and `json`.
+- **RFC 8620 Core Discovery**: Automatic session negotiation via `https://api.fastmail.com/jmap/session` or custom URLs.
+- **RFC 8621 Mail Batching**: High-throughput querying (`Email/query`) and retrieval (`Email/get`) fetching up to 200–500 emails per request.
+- **Rich Body Extraction**: Pulls `textBody` and `htmlBody` directly from structured JSON payloads.
+- **Status Flag & Keyword Mapping**: `$seen`, `$flagged`, `$answered`, and `$draft` keywords mapped directly to MAPI/MIME status flags.
+- **Incremental Resumption**: Checkpoint tracking (`--checkpoint`) compatible with `mail2rust`.
+
 ---
 
 ## Auditability, Pre-Flight Dry-Run & Forensic Logging
@@ -423,6 +448,7 @@ Detailed technical documentation mapping IETF RFCs and Microsoft Open Specificat
 - [`docs/rfc_compliance/RFC5322_RFC2045_MIME_AND_HEADERS.md`](docs/rfc_compliance/RFC5322_RFC2045_MIME_AND_HEADERS.md) — RFC 5322, RFC 2045–2047, RFC 2183/2231/2392 (`cid:` MHTML), S/MIME & PGP/MIME
 - [`docs/rfc_compliance/RFC4155_MBOX_AND_MAILBOX_FORMATS.md`](docs/rfc_compliance/RFC4155_MBOX_AND_MAILBOX_FORMATS.md) — RFC 4155 (`mbox` / `mboxrd`), RFC 3501 §5.1.3 (IMAP Modified UTF-7), Thunderbird, Maildir++, Apple Mail `.emlx`, MH, MMDF, and Babyl
 - [`docs/rfc_compliance/MS_OXMSG_CFBF_MAPI_AND_OLM.md`](docs/rfc_compliance/MS_OXMSG_CFBF_MAPI_AND_OLM.md) — [MS-CFB] (OLE2), [MS-OXMSG] (`.msg`), [MS-OXPROPS] (MAPI DASL properties & `PT_SYSTIME`), and Outlook for Mac `.olm`
+- [`docs/rfc_compliance/RFC8620_RFC8621_JMAP.md`](docs/rfc_compliance/RFC8620_RFC8621_JMAP.md) — RFC 8620 (JMAP Core Architecture, Session Discovery, JSON Batching) & RFC 8621 (JMAP for Mail, Keywords, Threads, Fastmail & Modern Mail Servers)
 
 ---
 

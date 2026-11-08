@@ -31,6 +31,10 @@ keywords = [
     "msg",
     "mapi",
     "rfc5322",
+    "jmap",
+    "rfc8620",
+    "rfc8621",
+    "fastmail",
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -56,6 +60,7 @@ mail2mail = "mail2mail:main"
 mail2eml = "mail2eml:main"
 mail2mbox = "mail2mbox:main"
 mail2pst = "mail2pst:main"
+mail2jmap = "mail2jmap:main"
 
 [tool.setuptools]
 py-modules = [

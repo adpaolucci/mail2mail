@@ -1,0 +1,140 @@
+{
+  "using": [
+    "urn:ietf:params:jmap:core",
+    "urn:ietf:params:jmap:mail"
+  ],
+  "methodResponses": [
+    [
+      "Email/get",
+      {
+        "accountId": "u12345678",
+        "state": "s1234",
+        "list": [
+          {
+            "id": "jmap_msg_001",
+            "blobId": "blob_001",
+            "threadId": "thread_fastmail_001",
+            "mailboxIds": {
+              "mb_inbox": true
+            },
+            "keywords": {
+              "$seen": true,
+              "$flagged": true
+            },
+            "size": 640,
+            "receivedAt": "2026-11-07T14:30:00Z",
+            "sentAt": "2026-11-07T14:29:45Z",
+            "messageId": [
+              "<jmap-fastmail-001@fastmail.com>"
+            ],
+            "inReplyTo": [],
+            "references": [],
+            "subject": "Project Titan: JMAP RFC 8620 & RFC 8621 Verification",
+            "from": [
+              {
+                "name": "Rob Mueller",
+                "email": "rob@fastmail.com"
+              }
+            ],
+            "to": [
+              {
+                "name": "Anthony Paolucci",
+                "email": "adpaolucci@fastmail.com"
+              }
+            ],
+            "cc": [],
+            "bcc": [],
+            "replyTo": [],
+            "textBody": [
+              {
+                "partId": "text_0",
+                "blobId": "blob_txt_0",
+                "size": 118,
+                "type": "text/plain"
+              }
+            ],
+            "htmlBody": [
+              {
+                "partId": "html_0",
+                "blobId": "blob_html_0",
+                "size": 164,
+                "type": "text/html"
+              }
+            ],
+            "bodyValues": {
+              "text_0": {
+                "value": "Hello Anthony,\n\nThis message verifies pure-Python JMAP ingestion under RFC 8620 and RFC 8621 standards.\n\nBest,\nRob",
+                "isTruncated": false,
+                "isEncodingProblem": false
+              },
+              "html_0": {
+                "value": "<p>Hello Anthony,</p><p>This message verifies <b>pure-Python JMAP ingestion</b> under RFC 8620 and RFC 8621 standards.</p><p>Best,<br>Rob</p>",
+                "isTruncated": false,
+                "isEncodingProblem": false
+              }
+            },
+            "attachments": []
+          },
+          {
+            "id": "jmap_msg_002",
+            "blobId": "blob_002",
+            "threadId": "thread_fastmail_001",
+            "mailboxIds": {
+              "mb_inbox": true
+            },
+            "keywords": {
+              "$seen": true,
+              "$answered": true
+            },
+            "size": 520,
+            "receivedAt": "2026-11-07T15:00:00Z",
+            "sentAt": "2026-11-07T14:59:50Z",
+            "messageId": [
+              "<jmap-fastmail-002@fastmail.com>"
+            ],
+            "inReplyTo": [
+              "<jmap-fastmail-001@fastmail.com>"
+            ],
+            "references": [
+              "<jmap-fastmail-001@fastmail.com>"
+            ],
+            "subject": "Re: Project Titan: JMAP RFC 8620 & RFC 8621 Verification",
+            "from": [
+              {
+                "name": "Anthony Paolucci",
+                "email": "adpaolucci@fastmail.com"
+              }
+            ],
+            "to": [
+              {
+                "name": "Rob Mueller",
+                "email": "rob@fastmail.com"
+              }
+            ],
+            "cc": [],
+            "bcc": [],
+            "replyTo": [],
+            "textBody": [
+              {
+                "partId": "text_1",
+                "blobId": "blob_txt_1",
+                "size": 85,
+                "type": "text/plain"
+              }
+            ],
+            "htmlBody": [],
+            "bodyValues": {
+              "text_1": {
+                "value": "Confirmed! High-throughput JSON synchronization verified with 100% MIME fidelity.",
+                "isTruncated": false,
+                "isEncodingProblem": false
+              }
+            },
+            "attachments": []
+          }
+        ]
+      },
+      "e0"
+    ]
+  ]
+}

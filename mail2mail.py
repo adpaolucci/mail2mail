@@ -101,23 +101,24 @@ FLAGS_WITH_VALUE = {
 
 def _print_top_help() -> None:
     print(
-        "usage: mail2mail {eml,mbox,pst} [options] ...\n"
+        "usage: mail2mail {eml,mbox,pst,jmap} [options] ...\n"
         "   or: mail2mail <src> <dest.pst | dest.mbox[.gz] | out_dir> [--to {eml,mbox,pst}] [options]\n\n"
         "mail2mail — Universal Email & Mailbox Converter (MBOX, Thunderbird ImapMail/Mail,\n"
         "Maildir/Maildir++, Apple Mail .emlx/.mbox, Outlook .msg/.olm/.pst, MH, MMDF, Babyl,\n"
-        "EML, and .gz/.bz2/.xz/.zip/.tar* archives <-> EML, MBOX, or Outlook PST).\n\n"
+        "EML, JMAP RFC 8620/8621, and .gz/.bz2/.xz/.zip/.tar* archives <-> EML, MBOX, or Outlook PST).\n\n"
         "Commands:\n"
         "  eml  (or mail2eml)    Convert any supported mail source into .eml files (No Outlook required)\n"
         "  mbox (or mail2mbox)   Convert any supported mail source into .mbox / .mbox.gz files\n"
-        "  pst  (or mail2pst)    Convert/import any supported mail source into Outlook .pst file(s)\n\n"
-        "Run `mail2mail eml --help`, `mail2mail mbox --help`, or `mail2mail pst --help` for full options."
+        "  pst  (or mail2pst)    Convert/import any supported mail source into Outlook .pst file(s)\n"
+        "  jmap (or mail2jmap)   Ingest live Fastmail or RFC 8620/8621 JMAP servers into PST, MBOX, or EML\n\n"
+        "Run `mail2mail eml --help`, `mail2mail mbox --help`, `mail2mail pst --help`, or `mail2mail jmap --help` for full options."
     )
 
 
 def _infer_mode(argv: List[str]) -> Tuple[str, List[str]]:
     """
-    Determine whether argv targets 'eml', 'mbox', or 'pst' and strip any explicit
-    subcommand ('eml'/'mbox'/'pst') or '--to {eml,mbox,pst}' flag.
+    Determine whether argv targets 'eml', 'mbox', 'pst', or 'jmap' and strip any explicit
+    subcommand ('eml'/'mbox'/'pst'/'jmap') or '--to {eml,mbox,pst}' flag.
     """
     if not argv or argv[0] in ("-h", "--help"):
         return "help", argv
@@ -129,6 +130,8 @@ def _infer_mode(argv: List[str]) -> Tuple[str, List[str]]:
         return "mbox", argv[1:]
     if first in ("pst", "to-pst", "mail2pst"):
         return "pst", argv[1:]
+    if first in ("jmap", "to-jmap", "mail2jmap"):
+        return "jmap", argv[1:]
 
     # Check for explicit --to {eml,mbox,pst}
     cleaned: List[str] = []
@@ -217,7 +220,11 @@ def main(argv: Optional[List[str]] = None) -> None:
             import mail2pst
             mail2pst.main(forwarded, prog="mail2mail pst")
         elif mode == "mbox":
+            import mail2mbox
             mail2mbox.main(forwarded, prog="mail2mail mbox")
+        elif mode == "jmap":
+            import mail2jmap
+            mail2jmap.main(forwarded)
         else:
             mail2eml.main(forwarded, prog="mail2mail eml")
     except KeyboardInterrupt:
