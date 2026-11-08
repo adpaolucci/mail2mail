@@ -61,6 +61,7 @@ mail2eml = "mail2eml:main"
 mail2mbox = "mail2mbox:main"
 mail2pst = "mail2pst:main"
 mail2jmap = "mail2jmap:main"
+mail2mcp = "mail2mcp:main"
 
 [tool.setuptools]
 py-modules = [
@@ -72,6 +73,8 @@ py-modules = [
     "mail2eml",
     "mail2mbox",
     "mail2pst",
+    "mail2jmap",
+    "mail2mcp",
 ]
 
 [tool.pytest.ini_options]

@@ -110,7 +110,8 @@ def _print_top_help() -> None:
         "  eml  (or mail2eml)    Convert any supported mail source into .eml files (No Outlook required)\n"
         "  mbox (or mail2mbox)   Convert any supported mail source into .mbox / .mbox.gz files\n"
         "  pst  (or mail2pst)    Convert/import any supported mail source into Outlook .pst file(s)\n"
-        "  jmap (or mail2jmap)   Ingest live Fastmail or RFC 8620/8621 JMAP servers into PST, MBOX, or EML\n\n"
+        "  jmap (or mail2jmap)   Ingest live Fastmail or RFC 8620/8621 JMAP servers into PST, MBOX, or EML\n"
+        "  mcp  (or mail2mcp)    Run Model Context Protocol (MCP) JSON-RPC stdio server for AI agents\n\n"
         "Run `mail2mail eml --help`, `mail2mail mbox --help`, `mail2mail pst --help`, or `mail2mail jmap --help` for full options."
     )
 
@@ -132,6 +133,8 @@ def _infer_mode(argv: List[str]) -> Tuple[str, List[str]]:
         return "pst", argv[1:]
     if first in ("jmap", "to-jmap", "mail2jmap"):
         return "jmap", argv[1:]
+    if first in ("mcp", "mail2mcp"):
+        return "mcp", argv[1:]
 
     # Check for explicit --to {eml,mbox,pst}
     cleaned: List[str] = []
@@ -225,6 +228,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         elif mode == "jmap":
             import mail2jmap
             mail2jmap.main(forwarded)
+        elif mode == "mcp":
+            import mail2mcp
+            mail2mcp.main(forwarded)
         else:
             mail2eml.main(forwarded, prog="mail2mail eml")
     except KeyboardInterrupt:

@@ -1,0 +1,26 @@
+# Smithery configuration for mail2mail
+# https://smithery.ai
+name: mail2mail-mcp
+version: "2.2.0"
+description: "Universal multi-format email migration, format sniffing, forensic auditing, and splitting suite in Python"
+repository: "https://github.com/adpaolucci/mail2mail"
+license: "MIT"
+
+entrypoint:
+  type: stdio
+  command: python
+  args:
+    - "-m"
+    - "mail2mcp"
+
+tools:
+  - name: mail2mail_info
+    description: "Inspect system environment, Python version, platform, Outlook COM availability, and supported formats."
+  - name: mail2mail_sniff
+    description: "Inspect magic bytes and classify mailbox format (PST, MSG, MBOX, EML, EMLX, OLM, Maildir, Thunderbird, etc.)."
+  - name: mail2mail_convert
+    description: "Convert mailbox between formats (EML, MBOX, PST) with optional deduplication and date filtering."
+  - name: mail2mail_audit
+    description: "Forensic audit: computes cryptographic SHA-256 item hashes, Bates numbering, and CSV manifest."
+  - name: mail2mail_split
+    description: "Split large mailbox into volume chunks by size or year while preserving folder hierarchies."

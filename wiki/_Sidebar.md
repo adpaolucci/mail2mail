@@ -12,6 +12,7 @@
 ### 🚀 Protocols & Alternatives
 * **[Alternative Export Pathways](Alternative-Export-Pathways)**
 * **[JMAP Protocol (RFC 8620/8621)](JMAP-Protocol-Specification)**
+* **[Model Context Protocol (MCP)](Model-Context-Protocol-MCP)**
 
 ---
 

@@ -340,6 +340,46 @@ Key JMAP Capabilities:
 
 ---
 
+### 6) Model Context Protocol (MCP) Server for AI Agents (`mail2mail mcp` or `mail2mcp.py`)
+
+`mail2mail` includes a built-in [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server allowing LLM agents (Claude Desktop, Cursor, Google Antigravity, AutoGPT) to inspect, classify, convert, audit, and split mailbox archives over standard JSON-RPC 2.0 stdio.
+
+#### Exposed Agent Tools:
+1. **`mail2mail_info`**: Inspects platform, Python version, and Outlook COM availability.
+2. **`mail2mail_sniff`**: Classifies 15+ email archive formats via magic bytes.
+3. **`mail2mail_convert`**: Converts mailboxes between EML, MBOX, and PST (with graceful cross-platform handling).
+4. **`mail2mail_audit`**: Forensic auditing: calculates SHA-256 Merkle root, applies Bates stamping, and exports CSV manifests.
+5. **`mail2mail_split`**: Splits large mailboxes by size or year into chunked volumes.
+
+#### Running the MCP Server:
+```bash
+# Run stdio MCP server for agent clients
+mail2mail mcp
+
+# Or via dedicated script
+python mail2mcp.py
+
+# Inspect tool JSON schemas
+mail2mail mcp --tools
+```
+
+#### Claude Desktop & Cursor Configuration:
+Add to `claude_desktop_config.json` or `.cursor/mcp.json`:
+```json
+{
+  "mcpServers": {
+    "mail2mail": {
+      "command": "python",
+      "args": ["-m", "mail2mcp"]
+    }
+  }
+}
+```
+
+> **Note on PST Export**: PST creation in `mail2mail` requires Microsoft Outlook on Windows via `pywin32` COM. For headless cloud VMs or cross-platform (Linux/macOS) native MS-PST binary generation with zero Outlook dependency, see our companion project [**`mail2rust`**](https://github.com/adpaolucci/mail2rust).
+
+---
+
 ## Auditability, Pre-Flight Dry-Run & Forensic Logging
 
 `mail2mail` includes built-in forensic auditing, manifest generation, and pre-flight inspection tools suited for compliance, legal eDiscovery, and enterprise migrations:
