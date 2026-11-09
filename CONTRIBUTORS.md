@@ -8,7 +8,7 @@ Every contributor, source repository, community fork author, and AI model that c
 
 ## 1. Project Maintainer & Lead
 
-- **Anthony Paolucci ([@adpaolucci](https://github.com/adpaolucci))**  
+- **mail2mail Maintainers ([@adpaolucci](https://github.com/adpaolucci))**  
   Project creator, architect, and lead maintainer. Directed the unification of disparate email migration tools into a single, high-fidelity, cross-platform CLI suite (`mail2mail`, `mail2eml`, `mail2mbox`, `mail2pst`), established the zero-data-loss standard, and guided the complete RFC compliance and production hardening roadmap.
 
 ---

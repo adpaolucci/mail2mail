@@ -1,11 +1,11 @@
 From: Dr. Evelyn Vance <evelyn.vance@titan.corp>
-To: Anthony Paolucci <adpaolucci@gmail.com>
+To: Alex Wright <alex.wright@corp.local>
 Subject: Project Titan: Architecture & Validation Specification
 Date: Fri, 06 Nov 2026 14:30:00 +0000
 Message-ID: <spec-titan-001@mail2rust.local>
 MIME-Version: 1.0
 Content-Type: text/plain; charset=utf-8
 
-Anthony,
+Team,
 
 The PST generation validation on Linux and Windows confirmed 100% compliance with Microsoft [MS-PST].

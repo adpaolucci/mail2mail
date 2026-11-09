@@ -11,7 +11,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.9"
 authors = [
-    { name = "Andrew Paolucci", email = "andrew@paolucci.ca" },
+    { name = "mail2mail contributors" },
     { name = "Henrique Madson" },
 ]
 dependencies = [

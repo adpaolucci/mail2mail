@@ -1,17 +1,19 @@
 {
-  "id": "chk_1794068636913",
-  "timestamp": "2026-11-07T16:23:56.913695600Z",
+  "id": "chk_1794256676753",
+  "timestamp": "2026-11-09T20:37:56.754046200Z",
   "source_id": "imap://mail.company.com:993",
   "target_id": "C:\\Archives\\archive.pst",
   "migrated_message_ids": [
-    "<spec-titan-001@mail2rust.local>",
+    "<audit-ediscovery-003@mail2rust.local>",
     "<spec-titan-002@mail2rust.local>",
-    "<audit-ediscovery-003@mail2rust.local>"
+    "<spec-titan-001@mail2rust.local>"
   ],
   "folder_high_watermarks": {
-    "Inbox": 2,
-    "Projects/Project Titan": 1
+    "Projects/Project Titan": 1,
+    "Inbox": 2
   },
+  "folder_uidvalidity": {},
+  "interrupted_reason": null,
   "total_bytes_migrated": 149800,
   "total_messages_migrated": 3,
   "status": "completed"

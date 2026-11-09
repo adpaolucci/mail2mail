@@ -129,7 +129,7 @@ class MockJmapHandler(http.server.BaseHTTPRequestHandler):
                                         {"name": "Rob Mueller", "email": "rob@fastmail.com"}
                                     ],
                                     "to": [
-                                        {"name": "Anthony Paolucci", "email": "adpaolucci@fastmail.com"}
+                                        {"name": "Tester", "email": "tester@fastmail.com"}
                                     ],
                                     "textBody": [
                                         {"partId": "t0", "size": 30, "type": "text/plain"}

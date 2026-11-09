@@ -12,7 +12,7 @@ SUMMARY:Q4 Migration Architecture Review & Verification
 DESCRIPTION:Reviewing pure-Rust MS-PST B-Tree generation and cyclic cipher performance.
 LOCATION:Conference Room Orion / Video Conference
 ORGANIZER;CN=Dr. Evelyn Vance:mailto:evelyn.vance@titan.corp
-ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;CN=Anthony Paolucci:mailto:adpaolucci@gmail.com
+ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;CN=Alex Wright:mailto:alex.wright@corp.local
 STATUS:CONFIRMED
 END:VEVENT
 END:VCALENDAR

@@ -25,6 +25,5 @@ This directory contains verified, production-compliant sample data for all major
 | `forensics/sample_manifest.json` | **JSON** | Forensic eDiscovery manifest with RFC 6234 Merkle root & Bates range | `JSON Forensic Manifest` | `cat forensics/sample_manifest.json` |
 | `forensics/sample_manifest.csv` | **CSV** | Chain-of-custody CSV ledger with dual SHA-256 and MD5 hashes | `CSV Forensic Manifest` | `cat forensics/sample_manifest.csv` |
 | `sync/sample_checkpoint.json` | **JSON** | ACID sync checkpoint tracking migrated message IDs and folder watermarks | `Sync Checkpoint` | `cat sync/sample_checkpoint.json` |
-| `jmap/sample_jmap_export.json` | **JMAP** | RFC 8620 / RFC 8621 JMAP Email batch entities with keywords and thread tracking | `JMAP RFC 8620/8621 JSON` | `python mail2mail.py eml samples/jmap/sample_jmap_export.json out_eml` |
 
 ---

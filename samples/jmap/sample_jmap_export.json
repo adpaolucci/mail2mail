@@ -38,8 +38,8 @@
             ],
             "to": [
               {
-                "name": "Anthony Paolucci",
-                "email": "adpaolucci@fastmail.com"
+                "name": "Tester",
+                "email": "tester@fastmail.com"
               }
             ],
             "cc": [],
@@ -63,12 +63,12 @@
             ],
             "bodyValues": {
               "text_0": {
-                "value": "Hello Anthony,\n\nThis message verifies pure-Python JMAP ingestion under RFC 8620 and RFC 8621 standards.\n\nBest,\nRob",
+                "value": "Hello Team,\n\nThis message verifies pure-Python JMAP ingestion under RFC 8620 and RFC 8621 standards.\n\nBest,\nRob",
                 "isTruncated": false,
                 "isEncodingProblem": false
               },
               "html_0": {
-                "value": "<p>Hello Anthony,</p><p>This message verifies <b>pure-Python JMAP ingestion</b> under RFC 8620 and RFC 8621 standards.</p><p>Best,<br>Rob</p>",
+                "value": "<p>Hello Team,</p><p>This message verifies <b>pure-Python JMAP ingestion</b> under RFC 8620 and RFC 8621 standards.</p><p>Best,<br>Rob</p>",
                 "isTruncated": false,
                 "isEncodingProblem": false
               }
@@ -101,8 +101,8 @@
             "subject": "Re: Project Titan: JMAP RFC 8620 & RFC 8621 Verification",
             "from": [
               {
-                "name": "Anthony Paolucci",
-                "email": "adpaolucci@fastmail.com"
+                "name": "Tester",
+                "email": "tester@fastmail.com"
               }
             ],
             "to": [
