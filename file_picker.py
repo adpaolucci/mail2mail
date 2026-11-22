@@ -164,6 +164,12 @@ def _tk_pick_save_file(
             pass
 
 
+def _ps_escape(value: str) -> str:
+    """Sanitize a string for safe interpolation inside a PowerShell single-quoted literal."""
+    cleaned = value.replace("\x00", "").replace("\r", " ").replace("\n", " ")
+    return cleaned.replace("'", "''")
+
+
 def _powershell_pick_file(
     title: str = "Select Mail File",
     filter_spec: str = "All Supported Mail Files|*.pst;*.ost;*.mbox;*.mbx;*.eml;*.emlx;*.msg;*.olm;*.zip|All Files|*.*",
@@ -172,12 +178,12 @@ def _powershell_pick_file(
 ) -> Optional[Union[str, List[str]]]:
     """Fallback Windows file picker using PowerShell System.Windows.Forms."""
     multiselect = "$true" if multiple else "$false"
-    init_dir = f"$dialog.InitialDirectory = '{initialdir}';" if initialdir and os.path.exists(initialdir) else ""
+    init_dir = f"$dialog.InitialDirectory = '{_ps_escape(initialdir)}';" if initialdir and os.path.exists(initialdir) else ""
     ps_script = f"""
 Add-Type -AssemblyName System.Windows.Forms
 $dialog = New-Object System.Windows.Forms.OpenFileDialog
-$dialog.Title = '{title}'
-$dialog.Filter = '{filter_spec}'
+$dialog.Title = '{_ps_escape(title)}'
+$dialog.Filter = '{_ps_escape(filter_spec)}'
 $dialog.Multiselect = {multiselect}
 {init_dir}
 $res = $dialog.ShowDialog()
@@ -212,11 +218,11 @@ def _powershell_pick_folder(
     initialdir: Optional[str] = None,
 ) -> Optional[str]:
     """Fallback Windows folder browser dialog using PowerShell."""
-    init_dir = f"$dialog.SelectedPath = '{initialdir}';" if initialdir and os.path.exists(initialdir) else ""
+    init_dir = f"$dialog.SelectedPath = '{_ps_escape(initialdir)}';" if initialdir and os.path.exists(initialdir) else ""
     ps_script = f"""
 Add-Type -AssemblyName System.Windows.Forms
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = '{title}'
+$dialog.Description = '{_ps_escape(title)}'
 $dialog.ShowNewFolderButton = $true
 {init_dir}
 $res = $dialog.ShowDialog()
@@ -245,14 +251,14 @@ def _powershell_save_file(
     initialdir: Optional[str] = None,
 ) -> Optional[str]:
     """Fallback Windows save file dialog using PowerShell."""
-    init_dir = f"$dialog.InitialDirectory = '{initialdir}';" if initialdir and os.path.exists(initialdir) else ""
+    init_dir = f"$dialog.InitialDirectory = '{_ps_escape(initialdir)}';" if initialdir and os.path.exists(initialdir) else ""
     ps_script = f"""
 Add-Type -AssemblyName System.Windows.Forms
 $dialog = New-Object System.Windows.Forms.SaveFileDialog
-$dialog.Title = '{title}'
-$dialog.Filter = '{filter_spec}'
-$dialog.DefaultExt = '{default_ext.lstrip(".")}'
-$dialog.FileName = '{initialfile}'
+$dialog.Title = '{_ps_escape(title)}'
+$dialog.Filter = '{_ps_escape(filter_spec)}'
+$dialog.DefaultExt = '{_ps_escape(default_ext.lstrip("."))}'
+$dialog.FileName = '{_ps_escape(initialfile)}'
 {init_dir}
 $res = $dialog.ShowDialog()
 if ($res -eq [System.Windows.Forms.DialogResult]::OK) {{

@@ -153,6 +153,34 @@ class TestFilePicker(unittest.TestCase):
         self.assertEqual(res, "C:\\Mail\\inbox.pst")
         mock_file.assert_called_once()
 
+    def test_powershell_escape_and_fallback_wrappers(self):
+        self.assertEqual(file_picker._ps_escape("O'Brien\r\n\x00Mail"), "O''Brien  Mail")
+
+        mock_proc = MagicMock(stdout="C:\\Mail\\picked.pst\n")
+        with patch("file_picker.subprocess.run", return_value=mock_proc) as mock_run:
+            res = file_picker._powershell_pick_file(
+                title="Bob's\nMail';Start-Process calc;#",
+                filter_spec="PST's|*.pst",
+            )
+            self.assertEqual(res, "C:\\Mail\\picked.pst")
+            script = mock_run.call_args[0][0][-1]
+            self.assertIn("$dialog.Title = 'Bob''s Mail'';Start-Process calc;#'", script)
+            self.assertIn("$dialog.Filter = 'PST''s|*.pst'", script)
+
+            file_picker._powershell_pick_folder(title="Bob's\rFolder")
+            folder_script = mock_run.call_args[0][0][-1]
+            self.assertIn("$dialog.Description = 'Bob''s Folder'", folder_script)
+
+            file_picker._powershell_save_file(
+                title="Save's\nTitle",
+                default_ext=".pst'\n",
+                initialfile="my'file.pst",
+            )
+            save_script = mock_run.call_args[0][0][-1]
+            self.assertIn("$dialog.Title = 'Save''s Title'", save_script)
+            self.assertIn("$dialog.DefaultExt = 'pst'' '", save_script)
+            self.assertIn("$dialog.FileName = 'my''file.pst'", save_script)
+
 
 if __name__ == "__main__":
     unittest.main()

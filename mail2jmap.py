@@ -84,9 +84,13 @@ class JmapSession:
         json_data: Optional[Dict[str, Any]] = None,
     ) -> Tuple[int, Dict[str, Any]]:
         """Perform an HTTP request with JMAP Bearer Token authentication."""
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme.lower() not in ("https", "http") or not parsed.netloc:
+            raise JmapError(f"Unsupported or invalid JMAP URL scheme: {url}")
+
         headers = {
             "Authorization": f"Bearer {self.token}",
-            "User-Agent": "mail2mail/3.3.0 (Python RFC8620/8621 JMAP Client)",
+            "User-Agent": "mail2mail/2.3.0 (Python RFC8620/8621 JMAP Client)",
             "Accept": "application/json",
         }
         body_bytes = None

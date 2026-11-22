@@ -23,7 +23,7 @@ import mail_formats
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "mail2mail-mcp"
-SERVER_VERSION = "2.2.0"
+SERVER_VERSION = "2.3.0"
 
 
 def get_system_info() -> Dict[str, Any]:
@@ -241,8 +241,6 @@ def run_convert(
         cmd.extend(["--since", since])
     if until:
         cmd.extend(["--until", until])
-    if bates_prefix:
-        cmd.extend(["--bates-prefix", bates_prefix])
     if audit_log:
         cmd.extend(["--audit-log", audit_log])
 
@@ -291,9 +289,9 @@ def run_audit(
         folder_str = "/".join(rec.folder_parts) if rec.folder_parts else "Inbox"
         rows.append({
             "item_index": total_items,
-            "bates_number": bates_num,
-            "folder": folder_str,
-            "source_name": rec.source_name,
+            "bates_number": mail_audit.csv_safe_cell(bates_num),
+            "folder": mail_audit.csv_safe_cell(folder_str),
+            "source_name": mail_audit.csv_safe_cell(rec.source_name),
             "size_bytes": size,
             "sha256": digest,
         })
@@ -339,21 +337,47 @@ def run_split(
     """Split oversized mailbox into volumes by size or year."""
     norm_src = os.path.normpath(source)
     norm_dest = os.path.normpath(destination_dir)
-    os.makedirs(norm_dest, exist_ok=True)
+    if not os.path.exists(norm_src):
+        raise FileNotFoundError(f"Source path not found: {source}")
 
     target = (target_format or "eml").lower()
-    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mail2mail.py")
-    cmd = [sys.executable, script_path, target, norm_src, norm_dest]
+    if target not in ("eml", "mbox", "pst"):
+        raise ValueError(f"Unsupported target_format: {target_format}")
 
-    if split_by == "year":
-        cmd.extend(["--split-by", "year"])
-    else:
-        if target == "pst":
-            cmd.extend(["--max-pst-gb", str(max(1, (max_volume_mb or 20000) // 1024))])
-        elif target == "mbox":
-            cmd.extend(["--max-mbox-size", f"{max_volume_mb}MB"])
+    if target == "pst":
+        info = get_system_info()
+        if not info["pst_export_supported_locally"]:
+            return {
+                "status": "error",
+                "error_type": "PST_REQUIRES_OUTLOOK",
+                "message": (
+                    "PST conversion in mail2mail requires Microsoft Outlook on Windows via pywin32 COM. "
+                    "On non-Windows platforms (Linux/macOS) or systems without Outlook, please export to 'eml' or 'mbox', "
+                    "or use the companion pure-Rust tool 'mail2rust' (https://github.com/adpaolucci/mail2rust) "
+                    "which generates 64-bit Unicode MS-PST binary containers natively with zero Outlook dependency."
+                ),
+                "source": norm_src,
+                "destination_dir": norm_dest,
+            }
+
+    os.makedirs(norm_dest, exist_ok=True)
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mail2mail.py")
+    vol_mb = max(1, int(max_volume_mb or 20000))
+
+    if target == "pst":
+        cmd = [sys.executable, script_path, "pst", "--src", norm_src, "--out-dir", norm_dest]
+        if split_by == "year":
+            cmd.extend(["--split-by", "year"])
         else:
-            cmd.extend(["--max-dir-size", f"{max_volume_mb}MB"])
+            cmd.extend(["--max-pst-size", f"{vol_mb}MB"])
+    else:
+        cmd = [sys.executable, script_path, target, norm_src, norm_dest]
+        if split_by == "year":
+            cmd.extend(["--layout", "year"])
+        elif target == "mbox":
+            cmd.extend(["--max-mbox-size", f"{vol_mb}MB"])
+        else:
+            cmd.extend(["--max-dir-size", f"{vol_mb}MB"])
 
     proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
     if proc.returncode != 0:
@@ -403,7 +427,6 @@ def get_tools_manifest() -> List[Dict[str, Any]]:
                     "dedup": {"type": "boolean", "description": "Deduplicate identical messages (default: false)"},
                     "since": {"type": "string", "description": "Optional ISO/YYYY-MM-DD date filter"},
                     "until": {"type": "string", "description": "Optional ISO/YYYY-MM-DD date filter"},
-                    "bates_prefix": {"type": "string", "description": "Optional Bates numbering prefix"},
                     "audit_log": {"type": "string", "description": "Optional audit log path"},
                 },
                 "required": ["source", "destination"],

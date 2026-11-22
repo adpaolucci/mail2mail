@@ -36,6 +36,23 @@ from mail_formats import (
 )
 
 
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_safe_cell(value: Any) -> Any:
+    """Neutralize spreadsheet formula-injection triggers in string CSV cells."""
+    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
+        return f"'{value}"
+    return value
+
+
+def _unescape_csv_cell(value: str) -> str:
+    """Reverse csv_safe_cell escaping when reading persisted CSV manifest fields."""
+    if value.startswith("'") and len(value) > 1 and value[1] in _CSV_FORMULA_PREFIXES:
+        return value[1:]
+    return value
+
+
 @dataclass
 class AuditRecord:
     timestamp: str
@@ -158,7 +175,8 @@ class AuditLogger:
                 if self._audit_is_jsonl:
                     self._audit_fh.write(json.dumps(rec.to_dict(), ensure_ascii=False) + "\n")
                 elif self._audit_csv_writer:
-                    self._audit_csv_writer.writerow(rec.to_dict())
+                    safe_row = {k: csv_safe_cell(v) for k, v in rec.to_dict().items()}
+                    self._audit_csv_writer.writerow(safe_row)
                 self._audit_fh.flush()
             except Exception:
                 pass
@@ -259,7 +277,7 @@ class AuditLogger:
                     for row in reader:
                         status = (row.get("status") or "").strip()
                         if "status" not in row or not status or status.upper() == "SUCCESS":
-                            mid = (row.get("message_id") or "").strip()
+                            mid = _unescape_csv_cell((row.get("message_id") or "").strip())
                             sha = (row.get("sha256") or "").strip()
                             if mid:
                                 completed.add(f"mid:{mid}")

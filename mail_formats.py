@@ -1298,7 +1298,7 @@ def iter_olm_records(
         if "com.microsoft.__messages" not in member.lower() and not base_fname.startswith("message_"):
             continue
 
-        raw_parts = [p for p in member.replace("\\", "/").split("/") if p]
+        raw_parts = [p for p in member.replace("\\", "/").split("/") if p and p not in (".", "..")]
         msg_marker_idx = -1
         for idx, p in enumerate(raw_parts):
             if p.lower() == "com.microsoft.__messages":
@@ -1317,6 +1317,8 @@ def iter_olm_records(
 
         try:
             xml_bytes = zf.read(member)
+            if b"<!entity" in xml_bytes.lower():
+                continue
             root = ET.fromstring(xml_bytes)
         except Exception:
             continue
@@ -2005,6 +2007,7 @@ def _iter_records_from_bytes(
                 io.BytesIO(data),
                 folder_parts,
                 include_deleted=include_deleted,
+                parse_gmail=parse_gmail,
             )
             return
         except Exception:
@@ -2101,7 +2104,7 @@ def _derive_archive_member_folder_parts(
     base_folder_parts: List[str],
 ) -> Tuple[List[str], Optional[Dict[str, bool]]]:
     norm = member_path.replace("\\", "/").strip("/")
-    parts = [p for p in norm.split("/") if p]
+    parts = [p for p in norm.split("/") if p and p not in (".", "..")]
     if not parts:
         return list(base_folder_parts) or ["Inbox"], None
 
@@ -2192,6 +2195,7 @@ def iter_tar_records(
     tar_path_or_fileobj,
     base_folder_parts: Optional[List[str]] = None,
     include_deleted: bool = False,
+    parse_gmail: bool = True,
 ) -> Iterator[MailRecord]:
     """Iterate records from a .tar / .tar.gz / .tgz / .tar.bz2 / .tar.xz archive."""
     base_parts = list(base_folder_parts) if base_folder_parts else []
@@ -2204,8 +2208,11 @@ def iter_tar_records(
         for member in tf:
             if not member.isfile() or member.size == 0:
                 continue
-            norm = member.name.replace("\\", "/").lstrip("./")
-            parts = [p for p in norm.split("/") if p]
+            norm = member.name.replace("\\", "/")
+            while norm.startswith("./"):
+                norm = norm[2:]
+            norm = norm.lstrip("/")
+            parts = [p for p in norm.split("/") if p and p not in (".", "..")]
             if not parts:
                 continue
             if any(p == "__MACOSX" or p.startswith("._") or p.lower() == "tmp" for p in parts):
@@ -2228,6 +2235,7 @@ def iter_tar_records(
                                 folder_parts,
                                 os.path.splitext(fname)[0],
                                 include_deleted=include_deleted,
+                                parse_gmail=parse_gmail,
                             )
                     except Exception:
                         pass
@@ -2247,6 +2255,7 @@ def iter_tar_records(
                 fname,
                 include_deleted=include_deleted,
                 ext_flags=ext_flags,
+                parse_gmail=parse_gmail,
             )
 
 
@@ -2300,7 +2309,7 @@ def iter_file_records(
         return
 
     if low.endswith((".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")):
-        yield from iter_tar_records(file_path, folder_parts or [], include_deleted=include_deleted)
+        yield from iter_tar_records(file_path, folder_parts or [], include_deleted=include_deleted, parse_gmail=parse_gmail)
         return
 
     if low.endswith((".zip", ".olm")):

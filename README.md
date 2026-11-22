@@ -2,9 +2,11 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB.svg)](pyproject.toml)
-[![RFC Compliant](https://img.shields.io/badge/RFC-5322%20%7C%202045--2047%20%7C%203501%20%7C%204155-success.svg)](docs/rfc_compliance/README.md)
+[![RFC Compliant](https://img.shields.io/badge/RFC-5322%20%7C%202045--2047%20%7C%203501%20%7C%204155%20%7C%208620--8621-success.svg)](docs/rfc_compliance/README.md)
 
-Convert between **MBOX**, **Thunderbird `ImapMail` / `Mail`** (mbox and Maildir modes), **Maildir / Maildir++**, **Apple Mail (`.emlx` / `.mbox` bundles)**, **Outlook `.msg`**, **Outlook for Mac `.olm`**, **Outlook `.pst`**, **MH / Sylpheed / Claws Mail**, **MMDF**, **Emacs Babyl**, **`.eml` trees**, and **compressed archives (`.gz`, `.bz2`, `.xz`, `.zip`, `.tar.gz`, `.tgz`)** into `.eml` folder hierarchies (`mail2eml`), standard `mboxrd` `.mbox` / `.mbox.gz` files (`mail2mbox`), or Microsoft Outlook **.pst** archives (`mail2pst`) with full folder hierarchy preservation, message flag mapping, size/year splitting, and resilient Outlook MAPI integration.
+**Website:** [mail2mail.guap.ca](https://mail2mail.guap.ca) &bull; **Wiki:** [Mailbox Migration & Protocol Engineering Wiki](https://github.com/adpaolucci/mail2mail/wiki)
+
+Convert between **MBOX**, **Thunderbird `ImapMail` / `Mail`** (mbox and Maildir modes), **Maildir / Maildir++**, **Apple Mail (`.emlx` / `.mbox` bundles)**, **Outlook `.msg`**, **Outlook for Mac `.olm`**, **Outlook `.pst`**, **MH / Sylpheed / Claws Mail**, **MMDF**, **Emacs Babyl**, **`.eml` trees**, **JMAP (RFC 8620/8621)**, and **compressed archives (`.gz`, `.bz2`, `.xz`, `.zip`, `.tar.gz`, `.tgz`)** into `.eml` folder hierarchies (`mail2eml`), standard `mboxrd` `.mbox` / `.mbox.gz` files (`mail2mbox`), or Microsoft Outlook **.pst** archives (`mail2pst`) with full folder hierarchy preservation, message flag mapping, size/year splitting, and resilient Outlook MAPI integration.
 
 ---
 
@@ -12,11 +14,17 @@ Convert between **MBOX**, **Thunderbird `ImapMail` / `Mail`** (mbox and Maildir 
 
 | Command / Module | Purpose | Requires Outlook? |
 | :--- | :--- | :--- |
-| [`mail2mail.py`](mail2mail.py) (`mail2mail`) | Unified master CLI (`mail2mail eml ...`, `mail2mail mbox ...`, `mail2mail pst ...`, or auto-detected from destination extension) | Only for `.pst` input/output |
+| [`mail2mail.py`](mail2mail.py) (`mail2mail`) | Unified master CLI (`mail2mail eml\|mbox\|pst\|jmap\|mcp\|pick ...`, or auto-detected from destination extension) | Only for `.pst` input/output |
 | [`mail2eml.py`](mail2eml.py) (`mail2eml`) | Convert any supported mail format or archive into `.eml` files (`folder`, `year`, `month`, or `flat` layout) | No (unless reading `.pst`) |
 | [`mail2mbox.py`](mail2mbox.py) (`mail2mbox`) | Convert any supported mail format or archive into standard `mboxrd` `.mbox` (or `.mbox.gz` / `.mbox.bz2` / `.mbox.xz`) file(s) | No (unless reading `.pst`) |
 | [`mail2pst.py`](mail2pst.py) (`mail2pst`) | Convert/import any supported mail format or archive into one or more Outlook `.pst` files (single PST, year-split, `N`-way split, or auto-rotated at `--max-pst-gb`) | Yes (`pywin32`) |
+| [`mail2jmap.py`](mail2jmap.py) (`mail2jmap`) | Native RFC 8620 / RFC 8621 JMAP client (Fastmail & JMAP servers) and static `.jmap` / `.jmap.json` ingestion | Only for `.pst` output |
+| [`mail2mcp.py`](mail2mcp.py) (`mail2mcp`) | JSON-RPC 2.0 `stdio` Model Context Protocol (MCP) server exposing 5 format-sniffing, conversion, auditing, and splitting tools to AI agents | Only for `.pst` conversion |
+| [`file_picker.py`](file_picker.py) | Cross-platform native host OS file, folder, and save dialogs (`--pick` / `--browse`) | No |
 | [`mail_formats.py`](mail_formats.py) | Shared multi-format detection, streaming, flag normalization, and folder hierarchy engine | No (Stdlib only; `pywin32` for `.pst` input) |
+| [`mail_audit.py`](mail_audit.py) | Pre-flight `--dry-run` inspection, CSV/JSONL audit manifests, failure logging, and SHA-256 chain-of-custody | No |
+| [`mail_filter.py`](mail_filter.py) | Date range filtering (`--since`/`--until`), folder glob rules, size parsing, and SQLite WAL / JSONL delta state cache | No |
+| [`mail_shutdown.py`](mail_shutdown.py) | Graceful `SIGINT` (`Ctrl+C`) / `SIGTERM` handler and interactive TTY pause/resume controller | No |
 
 ---
 
@@ -377,6 +385,25 @@ Add to `claude_desktop_config.json` or `.cursor/mcp.json`:
 ```
 
 > **Note on PST Export**: PST creation in `mail2mail` requires Microsoft Outlook on Windows via `pywin32` COM. For headless cloud VMs or cross-platform (Linux/macOS) native MS-PST binary generation with zero Outlook dependency, see our companion project [**`mail2rust`**](https://github.com/adpaolucci/mail2rust).
+
+---
+
+### 7) Native Host OS File & Folder Pickers (`--pick` / `--browse`)
+
+Launch native Windows Common Item Dialogs, macOS Cocoa `NSOpenPanel`, or Linux Desktop Portals to pick source archives/folders and destination targets interactively:
+
+```bash
+# Guided source + target format picker
+mail2mail pick
+
+# Open native file/folder pickers for a specific exporter
+python mail2pst.py --pick
+python mail2eml.py --pick
+python mail2mbox.py --browse
+
+# Standalone picker utility
+python file_picker.py --source
+```
 
 ---
 

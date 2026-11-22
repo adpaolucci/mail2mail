@@ -203,6 +203,41 @@ class TestAuditAndLogging(unittest.TestCase):
         self.assertTrue(os.path.isfile(out_mbox))
         self.assertTrue(os.path.isfile(audit_mbox_csv))
 
+    def test_csv_formula_neutralization_and_resume_roundtrip(self):
+        csv_path = os.path.join(self.tmpdir, "safe_manifest.csv")
+        logger = AuditLogger(audit_log_path=csv_path, quiet=True)
+        rec = AuditRecord(
+            timestamp="2026-11-22T00:00:00Z",
+            status="SUCCESS",
+            source_file="+bad.mbox",
+            source_folder="-Folder",
+            target_location="out.pst",
+            message_id="=msg123@example.com",
+            subject="=HYPERLINK(\"http://evil\", \"Click\")",
+            date="2026-11-22",
+            sender="@attacker",
+            recipients="user@example.com",
+            size_bytes=123,
+            attachment_count=0,
+            sha256="a" * 64,
+            notes="\tnotes",
+        )
+        logger.record_message(rec)
+        logger.close()
+
+        with open(csv_path, "r", encoding="utf-8", newline="") as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["subject"], "'=HYPERLINK(\"http://evil\", \"Click\")")
+        self.assertEqual(rows[0]["sender"], "'@attacker")
+        self.assertEqual(rows[0]["source_file"], "'+bad.mbox")
+        self.assertEqual(rows[0]["source_folder"], "'-Folder")
+        self.assertEqual(rows[0]["message_id"], "'=msg123@example.com")
+
+        completed = AuditLogger.load_completed_keys(csv_path)
+        self.assertIn("mid:=msg123@example.com", completed)
+        self.assertIn("sha256:" + ("a" * 64), completed)
+
 
 if __name__ == "__main__":
     unittest.main()

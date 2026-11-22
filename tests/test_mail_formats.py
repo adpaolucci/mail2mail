@@ -278,6 +278,30 @@ class TestMailFormats(unittest.TestCase):
             tf.add(mmdf_path, arcname="Takeout/Mail/test.mmdf")
         self.assertEqual(len(list(mail_formats.iter_mail_records(tgz_path))), 1)
 
+    def test_archive_traversal_segments_stripped(self):
+        eml_bytes = b"From: a@example.com\r\nSubject: Traversal Test\r\n\r\nBody\r\n"
+
+        zip_path = os.path.join(self.tmpdir, "traversal.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("../../Inbox/../Secret/msg.eml", eml_bytes)
+        zip_recs = list(mail_formats.iter_mail_records(zip_path))
+        self.assertEqual(len(zip_recs), 1)
+        self.assertNotIn("..", zip_recs[0].folder_parts)
+        self.assertNotIn(".", zip_recs[0].folder_parts)
+        self.assertEqual(zip_recs[0].folder_parts, ["Inbox", "Secret"])
+
+        tgz_path = os.path.join(self.tmpdir, "traversal.tgz")
+        eml_file = os.path.join(self.tmpdir, "msg.eml")
+        with open(eml_file, "wb") as f:
+            f.write(eml_bytes)
+        with tarfile.open(tgz_path, "w:gz") as tf:
+            tf.add(eml_file, arcname="./../../Archive/./2026/msg.eml")
+        tar_recs = list(mail_formats.iter_mail_records(tgz_path))
+        self.assertEqual(len(tar_recs), 1)
+        self.assertNotIn("..", tar_recs[0].folder_parts)
+        self.assertNotIn(".", tar_recs[0].folder_parts)
+        self.assertEqual(tar_recs[0].folder_parts, ["Archive", "2026"])
+
 
 if __name__ == "__main__":
     unittest.main()

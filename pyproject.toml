@@ -65,6 +65,7 @@ mail2mcp = "mail2mcp:main"
 
 [tool.setuptools]
 py-modules = [
+    "file_picker",
     "mail_formats",
     "mail_audit",
     "mail_filter",

@@ -306,6 +306,14 @@ class TestJmapRFCCompliance(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertIn(b"Mock JMAP Fastmail Test", records[0].raw_bytes)
 
+    def test_jmap_rejects_non_http_schemes(self) -> None:
+        """Verify JmapSession.request rejects file:// and non-HTTP(S) URLs."""
+        session = mail2jmap.JmapSession("file:///etc/passwd", token="mock-token")
+        with self.assertRaises(mail2jmap.JmapError):
+            session.connect()
+        with self.assertRaises(mail2jmap.JmapError):
+            session.request("GET", "ftp://example.com/jmap")
+
 
 if __name__ == "__main__":
     unittest.main()

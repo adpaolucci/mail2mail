@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
 import mail2mcp
 
@@ -37,7 +38,7 @@ class TestMail2Mcp(unittest.TestCase):
     def test_system_info(self):
         info = mail2mcp.get_system_info()
         self.assertEqual(info["server"], "mail2mail-mcp")
-        self.assertEqual(info["version"], "2.2.0")
+        self.assertEqual(info["version"], "2.3.0")
         self.assertIn("python_version", info)
         self.assertIn("supported_formats", info)
         self.assertIsInstance(info["supported_formats"], list)
@@ -151,6 +152,62 @@ class TestMail2Mcp(unittest.TestCase):
         tools = json.loads(proc.stdout)
         self.assertIsInstance(tools, list)
         self.assertGreaterEqual(len(tools), 5)
+        convert_tool = next(t for t in tools if t["name"] == "mail2mail_convert")
+        self.assertNotIn("bates_prefix", convert_tool["inputSchema"]["properties"])
+
+    def test_run_split_cli_flags(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = os.path.join(tmpdir, "box.mbox")
+            with open(src, "wb") as f:
+                f.write(b"From a@b.com Fri Nov 6 10:00:00 2026\r\nFrom: a@b.com\r\nSubject: S\r\n\r\nBody\r\n")
+            out_dir = os.path.join(tmpdir, "out")
+
+            ok_proc = MagicMock(returncode=0, stdout="ok", stderr="")
+            with patch("mail2mcp.subprocess.run", return_value=ok_proc) as mock_run:
+                mail2mcp.run_split(src, out_dir, split_by="year", target_format="eml")
+                eml_cmd = mock_run.call_args[0][0]
+                self.assertIn("--layout", eml_cmd)
+                self.assertIn("year", eml_cmd)
+                self.assertNotIn("--split-by", eml_cmd)
+
+                mail2mcp.run_split(src, out_dir, split_by="year", target_format="mbox")
+                mbox_cmd = mock_run.call_args[0][0]
+                self.assertIn("--layout", mbox_cmd)
+                self.assertIn("year", mbox_cmd)
+                self.assertNotIn("--split-by", mbox_cmd)
+
+            with patch("mail2mcp.get_system_info", return_value={"pst_export_supported_locally": True}):
+                with patch("mail2mcp.subprocess.run", return_value=ok_proc) as mock_run:
+                    mail2mcp.run_split(src, out_dir, max_volume_mb=512, split_by="size", target_format="pst")
+                    pst_cmd = mock_run.call_args[0][0]
+                    self.assertIn("--src", pst_cmd)
+                    self.assertIn("--out-dir", pst_cmd)
+                    self.assertIn("--max-pst-size", pst_cmd)
+                    self.assertIn("512MB", pst_cmd)
+
+            with patch("mail2mcp.get_system_info", return_value={"pst_export_supported_locally": False}):
+                err_res = mail2mcp.run_split(src, out_dir, target_format="pst")
+                self.assertEqual(err_res["status"], "error")
+                self.assertEqual(err_res["error_type"], "PST_REQUIRES_OUTLOOK")
+
+    def test_run_audit_neutralizes_csv_formulas(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src_root = os.path.join(tmpdir, "src")
+            evil_dir = os.path.join(src_root, "=CMD('calc')")
+            os.makedirs(evil_dir, exist_ok=True)
+            eml_path = os.path.join(evil_dir, "+evil.eml")
+            with open(eml_path, "wb") as f:
+                f.write(b"From: a@b.com\r\nSubject: Test\r\n\r\nBody")
+            csv_path = os.path.join(tmpdir, "audit.csv")
+            res = mail2mcp.run_audit(src_root, output_csv=csv_path, bates_prefix="@BATES")
+            self.assertEqual(res["status"], "success")
+            import csv
+            with open(csv_path, "r", encoding="utf-8", newline="") as f:
+                rows = list(csv.DictReader(f))
+            self.assertEqual(len(rows), 1)
+            self.assertTrue(rows[0]["bates_number"].startswith("'@BATES"))
+            self.assertTrue(rows[0]["folder"].startswith("'="))
+            self.assertTrue(rows[0]["source_name"].startswith("'+"))
 
 
 if __name__ == "__main__":

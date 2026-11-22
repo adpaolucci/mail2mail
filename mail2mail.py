@@ -101,7 +101,7 @@ FLAGS_WITH_VALUE = {
 
 def _print_top_help() -> None:
     print(
-        "usage: mail2mail {eml,mbox,pst,jmap} [options] ...\n"
+        "usage: mail2mail {eml,mbox,pst,jmap,mcp,pick} [options] ...\n"
         "   or: mail2mail <src> <dest.pst | dest.mbox[.gz] | out_dir> [--to {eml,mbox,pst}] [options]\n\n"
         "mail2mail — Universal Email & Mailbox Converter (MBOX, Thunderbird ImapMail/Mail,\n"
         "Maildir/Maildir++, Apple Mail .emlx/.mbox, Outlook .msg/.olm/.pst, MH, MMDF, Babyl,\n"
