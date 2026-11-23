@@ -24,13 +24,19 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        exclude:
+          - os: ubuntu-latest
+            python-version: "3.9"
+        include:
+          - os: ubuntu-24.04
+            python-version: "3.9"
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -40,7 +46,11 @@ jobs:
       - name: Run automated RFC compliance and format test suite
         run: python -m unittest discover -s tests -v
 
-      - name: Verify editable package installation and CLI entry points
-        run: |
-          python -m pip install --no-deps --no-build-isolation -e .
-          mail2mail --help
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install package in editable mode
+        run: python -m pip install --no-deps -e .
+
+      - name: Verify CLI entry points
+        run: mail2mail --help
