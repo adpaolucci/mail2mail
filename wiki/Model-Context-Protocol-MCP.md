@@ -4,15 +4,15 @@ The **Model Context Protocol (MCP)** enables AI agents (Claude Desktop, Cursor, 
 
 ---
 
-## 1. Exposed Tools
+## 1. Exposed Tools (5 Total)
 
 | Tool Name | Description | Key Inputs | Notes |
 | :--- | :--- | :--- | :--- |
-| **`mail2mail_info`** | Inspects Python version, OS platform, and Outlook COM availability. | *(None)* | Returns whether PST creation is supported locally. |
-| **`mail2mail_sniff`** | Classifies mailbox formats and magic bytes across 15+ formats. | `path` | Fast in-process detection. |
-| **`mail2mail_convert`** | Converts between EML, MBOX, and PST with optional deduplication. | `source`, `destination`, `target_format`, `dedup`, `since`, `until` | Gracefully handles non-Windows PST requests. |
-| **`mail2mail_audit`** | Calculates SHA-256 Merkle root, applies Bates numbering, exports CSV manifest. | `path`, `output_csv`, `case_number`, `bates_prefix` | Tamper-evident forensic chain of custody. |
-| **`mail2mail_split`** | Splits large mailboxes into volumes by size or year. | `source`, `destination_dir`, `max_volume_mb`, `split_by`, `target_format` | Preserves folder structures. |
+| **`mail2mail_info`** | Inspects Python version, OS platform, Outlook COM availability, and supported formats. | *(None)* | Returns whether local Outlook MAPI PST creation is supported. |
+| **`mail2mail_sniff`** | Classifies mailbox formats and magic bytes across 15+ formats. | `path` | Fast in-process detection of files and directory hierarchies. |
+| **`mail2mail_convert`** | Converts between EML, MBOX, and PST with optional deduplication, date filtering, and audit log generation. | `source`, `destination`, `target_format`, `dedup`, `since`, `until`, `audit_log` | Gracefully handles non-Windows PST requests. |
+| **`mail2mail_audit`** | Calculates SHA-256 Merkle root, applies Bates numbering, exports CSV manifest. | `path`, `output_csv`, `case_number`, `examiner`, `bates_prefix` | Tamper-evident forensic chain of custody. |
+| **`mail2mail_split`** | Splits large mailboxes into volumes by size or year. | `source`, `destination_dir`, `max_volume_mb`, `split_by`, `target_format` | Preserves folder structures across split volumes. |
 
 ---
 

@@ -46,7 +46,7 @@ To connect migration software (`mail2rust`, `mail2mail`, Thunderbird, Outlook) t
 ### 2.3 Rogers Yahoo Mail (`@rogers.com`)
 Because Rogers uses Yahoo's backend with carrier single sign-on (SSO), app passwords must be generated via the Rogers Member Centre:
 1. Log in to [mail.rogers.com](https://mail.rogers.com) or [rogersmembercentre.com](https://www.rogersmembercentre.com/).
-2. Navigate to **Account Settings** $\rightarrow$ **Account Security**.
+2. Navigate to **Account Settings** → **Account Security**.
 3. Under the **External Connections** or **App Passwords** section, click **Generate App Password**.
 4. Enter an identifier (e.g., `Migration CLI`) and copy the code.
 5. Use your full email address (`username@rogers.com`) with this code on `export.imap.mail.yahoo.com:993`.
@@ -63,7 +63,7 @@ Because Rogers uses Yahoo's backend with carrier single sign-on (SSO), app passw
 ---
 
 ### 2.5 Fastmail API Tokens
-1. In Fastmail, go to **Settings** $\rightarrow$ **Password & Security** $\rightarrow$ **Integrations**.
+1. In Fastmail, go to **Settings** → **Password & Security** → **Integrations**.
 2. Click **New API Token**.
 3. Grant permissions:
    * For IMAP: Check **Mail (read-only)** or **Mail (full access)**.

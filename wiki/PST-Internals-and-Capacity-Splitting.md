@@ -31,18 +31,18 @@ While Unicode PST 64-bit architecture theoretically supports up to 4 Petabytes, 
 ### Consequences of Exceeding 45–50 GB in Outlook:
 * **`0x80040119` Error:** Outlook refuses to write new emails or move folders.
 * **Search Index Freezes:** Windows Desktop Search slows down exponentially or crashes.
-* **Scanpst.exe Failure:** Microsoft's Inbox Repair Tool (`scanpst.exe`) runs out of memory or aborts on files $> 50\text{ GB}$.
+* **Scanpst.exe Failure:** Microsoft's Inbox Repair Tool (`scanpst.exe`) runs out of memory or aborts on files > 50 GB.
 * **High Corruption Risk:** System crashes or power loss during writes to a 50+ GB PST frequently corrupt the root B-Tree nodes.
 
 ---
 
 ## 3. Dynamic Capacity Splitting in `mail2rust`
 
-To resolve this limitation, `mail2rust` implements **dynamic volume splitting** via the `--split-size` flag:
+To resolve this limitation, `mail2rust` implements **dynamic volume splitting** via the `--max-pst-size` flag:
 
 ```bash
 # Split large archive into consecutive 20 GB volume files
-mail2rust convert large_export.mbox archive.pst --split-size 20GB
+mail2rust convert large_export.mbox archive.pst --max-pst-size 20GB
 ```
 
 ### 3.1 Naming Convention & Sequence
@@ -65,10 +65,13 @@ When a volume reaches capacity:
 Conversely, when multiple segmented PST files exist (e.g. legacy annual archives or multi-part exports), `mail2rust` and `mail2mail` can merge them back into a single consolidated PST:
 
 ```bash
+mail2rust merge "a.pst" "b.pst" -o "master_archive.pst" --dedup message-id
+
+# Or merge multiple annual archives:
 mail2rust merge \
-  --input "archive_2021.pst" \
-  --input "archive_2022.pst" \
-  --input "archive_2023.pst" \
-  --dedup message-id \
-  --out "master_archive.pst"
+  "archive_2021.pst" \
+  "archive_2022.pst" \
+  "archive_2023.pst" \
+  -o "master_archive.pst" \
+  --dedup message-id
 ```

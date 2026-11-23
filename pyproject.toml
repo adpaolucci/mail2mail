@@ -55,6 +55,12 @@ classifiers = [
     "Topic :: Utilities",
 ]
 
+[project.urls]
+Homepage = "https://mail2mail.guap.ca"
+Documentation = "https://github.com/adpaolucci/mail2mail/wiki"
+Repository = "https://github.com/adpaolucci/mail2mail"
+Issues = "https://github.com/adpaolucci/mail2mail/issues"
+
 [project.scripts]
 mail2mail = "mail2mail:main"
 mail2eml = "mail2eml:main"

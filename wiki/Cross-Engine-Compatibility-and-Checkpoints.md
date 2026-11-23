@@ -22,10 +22,10 @@ Both engines implement standardized flags and exit behaviors:
 | `--until <date>` / `--before <date>` | Inclusive upper timestamp bound. Date-only strings evaluate to `23:59:59.999999` UTC of that day. |
 | `--include-folder <glob>` | Case-insensitive glob applied to folder hierarchy (repeatable). |
 | `--exclude-folder <glob>` | Case-insensitive glob applied to folder hierarchy (repeatable). |
-| `--split-size <size>` | Dynamic capacity boundary (e.g. `20GB`, `500MB`, `15G`, `4g`, `1024K`, raw bytes). |
-| `--state-file <path>` | Path to shared SQLite (`.sqlite`, `.db`) or JSON Lines (`.jsonl`) checkpoint cache. |
+| `--max-pst-size <size>` | Dynamic capacity boundary (e.g. `20GB`, `500MB`, `15G`, `4g`, `1024K`, raw bytes). |
+| `--state-file <path>` | Path to shared SQLite (`.sqlite`, `.db`) or JSON / JSON Lines (`.json`, `.jsonl`) checkpoint cache. |
 | `--resume <path>` | Explicit checkpoint file to resume an interrupted transfer from. |
-| `--dedup <mode>` | Deduplication mode: `none`, `auto`, `message-id`, `sha256`. |
+| `--dedup <mode>` | Deduplication mode: `none`, `message-id`, `sha256`, `content` (`mail2rust`) or `--dedup` (`mail2mail`). |
 
 ---
 
@@ -56,14 +56,14 @@ Used for lightweight, human-readable state hand-off between Python and Rust:
 ```
 
 #### Cross-Engine Handoff Workflows:
-* **Python $\to$ Rust:**
-  1. `mail2mail` starts an export: `python mail2mail.py export mailbox.mbox out.pst --state-file checkpoint.json`.
+* **Python → Rust:**
+  1. `mail2mail` starts an export: `python mail2mail.py pst mailbox.mbox out.pst --state-file checkpoint.json`.
   2. The process is interrupted at 50,000 messages.
   3. `mail2rust` resumes the job: `mail2rust convert mailbox.mbox out.pst --resume checkpoint.json`.
   4. Rust skips the 50,000 processed IDs and streams the remaining messages without duplicates.
-* **Rust $\to$ Python:**
+* **Rust → Python:**
   1. `mail2rust` runs with `--state-file checkpoint.json`.
-  2. `mail2mail` resumes using `--resume checkpoint.json` seamlessly.
+  2. `mail2mail` resumes using `python mail2mail.py pst mailbox.mbox out.pst --resume checkpoint.json` seamlessly.
 
 ---
 

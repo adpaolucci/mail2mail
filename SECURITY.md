@@ -31,4 +31,5 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability (such as an archive extraction bypass or parser denial-of-service), please open a private security advisory on GitHub rather than posting a public issue containing exploit payloads.
+If you discover a security vulnerability (such as an archive extraction bypass or parser denial-of-service), please open a private security advisory on GitHub rather than posting a public issue containing exploit payloads:
+`https://github.com/adpaolucci/mail2mail/security/advisories/new`

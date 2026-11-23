@@ -197,7 +197,6 @@ def run_convert(
     dedup: bool = False,
     since: Optional[str] = None,
     until: Optional[str] = None,
-    bates_prefix: Optional[str] = None,
     audit_log: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute mailbox conversion across formats."""
@@ -485,7 +484,7 @@ def handle_jsonrpc(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             },
         }
 
-    if method == "notifications/initialized":
+    if method.startswith("notifications/"):
         return None
 
     if method == "ping":
@@ -512,7 +511,6 @@ def handle_jsonrpc(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     dedup=args.get("dedup", False),
                     since=args.get("since"),
                     until=args.get("until"),
-                    bates_prefix=args.get("bates_prefix"),
                     audit_log=args.get("audit_log"),
                 )
             elif name == "mail2mail_audit":
@@ -555,6 +553,9 @@ def handle_jsonrpc(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     "isError": True,
                 },
             }
+
+    if req_id is None:
+        return None
 
     return {
         "jsonrpc": "2.0",

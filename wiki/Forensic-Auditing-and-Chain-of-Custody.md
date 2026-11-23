@@ -9,8 +9,8 @@ In eDiscovery, compliance archiving, and legal investigations, email migrations 
 ## 1. Cryptographic Hash Verification
 
 Every message ingested and converted is tracked by:
-1. **Source MIME Hash:** $\text{SHA-256}(\text{RawMessageBytes})$
-2. **Normalized Header Hash:** $\text{SHA-256}(\text{CanonicalHeaders})$ (stripping transit-added headers like `X-Spam-Status`, `Received`, `Return-Path` to verify body integrity across different relay servers).
+1. **Source MIME Hash:** `SHA-256(RawMessageBytes)`
+2. **Normalized Header Hash:** `SHA-256(CanonicalHeaders)` (stripping transit-added headers like `X-Spam-Status`, `Received`, `Return-Path` to verify body integrity across different relay servers).
 3. **Payload Attachment Hashes:** Individual SHA-256 checksums for every embedded attachment stream.
 
 ---
@@ -51,7 +51,7 @@ timestamp,source_file,source_folder,target_folder,message_id,sha256,size_bytes,s
 
 ## 3. MIME Normalization & Bit-Exact Reproducibility
 
-When comparing messages between formats (e.g. MBOX $\leftrightarrow$ PST $\leftrightarrow$ EML), differences in line endings or header folding can cause naive hash comparisons to fail.
+When comparing messages between formats (e.g. MBOX ↔ PST ↔ EML), differences in line endings or header folding can cause naive hash comparisons to fail.
 
 The forensic engine applies deterministic RFC 5322 normalization:
 * **Line Ending Canonicalization:** Converts mixed `\r\n` and bare `\n` into standard network `\r\n` (CRLF) for MIME and `\n` for MBOX.
@@ -65,12 +65,16 @@ The forensic engine applies deterministic RFC 5322 normalization:
 Both toolchains offer dedicated CLI commands to inspect, verify, and validate mail stores without modifying them:
 
 ```bash
-# Verify integrity of a PST file against an audit manifest
-mail2rust forensics verify archive.pst --manifest migration_audit.csv
+# Audit a PST file and generate CSV manifest + JSON chain-of-custody certificate
+mail2rust audit archive.pst -o migration_audit.csv --output-json audit_certificate.json
 
-# Inspect MAPI property streams of an individual .msg file
-mail2rust inspect message.msg
+# Validate MS-PST header magic (!BDN), CRC-32 checksums, and NBT/BBT B-Trees
+mail2rust validate-pst archive.pst
 
-# Dump raw MAPI property tags from an Outlook .ost cache
-python mail2mail.py inspect cache.ost
+# Sniff magic bytes and format signature of an individual .msg file
+mail2rust sniff message.msg
+
+# Classify format via mail2mail MCP sniffer or extract an Outlook .ost cache to EML
+python mail2mcp.py --tools
+python mail2mail.py eml cache.ost ./extracted_eml
 ```

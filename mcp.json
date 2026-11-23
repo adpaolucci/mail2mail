@@ -3,7 +3,8 @@
     "mail2mail": {
       "command": "python",
       "args": [
-        "mail2mcp.py"
+        "-m",
+        "mail2mcp"
       ]
     }
   }

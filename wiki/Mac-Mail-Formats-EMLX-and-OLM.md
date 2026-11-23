@@ -24,8 +24,8 @@ Apple Mail stores individual email messages in `.emlx` files. An `.emlx` file is
 
 ### 1.1 Parsing Specification
 1. **Segment 1 (Length Prefix):** Read the first line as an ASCII decimal string. Example: `20485\n`. This defines the exact length in bytes of the following MIME message.
-2. **Segment 2 (MIME Stream):** Read exactly $N$ bytes starting immediately after the first newline. This slice is a 100% compliant RFC 5322 message stream and can be saved directly as a `.eml` file.
-3. **Segment 3 (XML Plist Trailer):** All remaining bytes after $N$ belong to an Apple Property List dictionary. Key plist tags extracted:
+2. **Segment 2 (MIME Stream):** Read exactly `N` bytes starting immediately after the first newline. This slice is a 100% compliant RFC 5322 message stream and can be saved directly as a `.eml` file.
+3. **Segment 3 (XML Plist Trailer):** All remaining bytes after `N` belong to an Apple Property List dictionary. Key plist tags extracted:
    * `flags`: Integer bitmask encoding read/unread (`1 << 0`), flagged (`1 << 4`), replied (`1 << 2`), forwarded (`1 << 8`).
    * `conversation-id`: 64-bit integer tracking Apple Mail thread hierarchies.
    * `read`: Boolean flag indicating `\Seen` state.
@@ -113,5 +113,5 @@ mail2rust convert ~/Library/Mail/V10/ mac_mail.pst
 mail2rust convert backup.olm ./extracted_emails/
 
 # Ingest OLM via mail2mail
-python mail2mail.py convert backup.olm out.mbox
+python mail2mail.py mbox backup.olm out.mbox
 ```

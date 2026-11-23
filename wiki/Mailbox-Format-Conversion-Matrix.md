@@ -24,7 +24,7 @@
 
 The table below shows direct conversion pathways supported by the toolchains:
 
-| Input Format $\downarrow$ \ Output Format $\rightarrow$ | PST | MBOX | EML Directory | Maildir | JMAP JSON |
+| Input Format ↓ \ Output Format → | PST | MBOX | EML Directory | Maildir | JMAP JSON |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **PST** | — | Direct | Direct | Direct | Direct |
 | **OST** | Direct | Direct | Direct | Direct | Direct |
@@ -93,11 +93,14 @@ classDiagram
 Both `mail2rust` and `mail2mail` can merge multiple disparate sources (e.g., a Google Takeout MBOX, an Apple Mail `.emlx` archive, and an Outlook `.ost` cache) into a single, unified, de-duplicated PST file:
 
 ```bash
+# Merge PST files into a unified master archive with deduplication
+mail2rust merge "a.pst" "b.pst" -o "master_archive.pst" --dedup message-id
+
 # Merge MBOX, EML directory, and OST into a unified PST with deduplication
 mail2rust merge \
-  --input "takeout.mbox" \
-  --input "C:\Users\User\MailArchive\" \
-  --input "outlook_cache.ost" \
-  --dedup message-id \
-  --out "consolidated_archive.pst"
+  "takeout.mbox" \
+  "C:\Users\User\MailArchive" \
+  "outlook_cache.ost" \
+  -o "consolidated_archive.pst" \
+  --dedup message-id
 ```

@@ -17,7 +17,7 @@ flowchart TD
 
     subgraph Microsoft["Microsoft 365 / Outlook"]
         M1["Cached Mode (.ost)"] --> |Zero-Network Offline Read| Tool
-        M2["Graph API (/$value)"] --> |429 Backoff Aware| Tool
+        M2["Graph API (raw MIME endpoint)"] --> |429 Backoff Aware| Tool
         M3["Purview eDiscovery"] --> |Azure PST Download| Tool
     end
 
@@ -63,7 +63,7 @@ flowchart TD
 
 ### Pathway A: Desktop Outlook Cached Exchange Mode (`.ost` Extraction)
 If the user already has Microsoft Outlook installed on a workstation:
-1. Open Outlook $\rightarrow$ **File** $\rightarrow$ **Account Settings** $\rightarrow$ **Account Settings**.
+1. Open Outlook → **File** → **Account Settings** → **Account Settings**.
 2. Select the account, click **Change**, ensure **Cached Exchange Mode** is checked, and move the **Download email for the past:** slider to **All**.
 3. Allow Outlook to synchronize in the background using its proprietary MAPI/HTTP transport (which is significantly more resilient than IMAP).
 4. Locate the local `.ost` file (usually in `%LOCALAPPDATA%\Microsoft\Outlook\*.ost`).
@@ -89,7 +89,7 @@ If the user already has Microsoft Outlook installed on a workstation:
 
 ### Pathway A: Apple Data & Privacy Portal (`privacy.apple.com`)
 1. Log into [privacy.apple.com](https://privacy.apple.com/) using the Apple ID.
-2. Select **"Request a copy of your data"** $\rightarrow$ check **iCloud Mail**.
+2. Select **"Request a copy of your data"** → check **iCloud Mail**.
 3. Apple compiles your complete mailbox into downloadable `.mbox` files.
 4. Download and process locally with `mail2rust` or `mail2mail`.
 
@@ -118,7 +118,7 @@ Fastmail was the primary pioneer of the **JSON Meta Application Protocol (JMAP)*
   ```
 
 ### Pathway B: Fastmail Web Export
-* Located under **Settings** $\rightarrow$ **Import & Export** $\rightarrow$ **Export**.
+* Located under **Settings** → **Import & Export** → **Export**.
 * Exports `.zip` archives of `.mbox` files (limited to 4 GB per download batch; larger accounts should export folder-by-folder).
 
 ---

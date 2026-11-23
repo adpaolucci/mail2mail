@@ -62,9 +62,9 @@ To prevent the "thundering herd" problem where synchronized threads retry simult
 $$T_{\text{sleep}} = \min(T_{\text{max}}, 2^{\text{attempt}} \cdot T_{\text{base}}) + \text{uniform}(0, T_{\text{jitter}})$$
 
 Where:
-* $T_{\text{base}} = 2.0\text{ seconds}$
-* $T_{\text{max}} = 300\text{ seconds}$ (5 minutes)
-* $T_{\text{jitter}} = 3.0\text{ seconds}$
+* `T_base = 2.0 seconds`
+* `T_max = 300 seconds` (5 minutes)
+* `T_jitter = 3.0 seconds`
 
 ### Rust Implementation Pattern
 ```rust
@@ -119,7 +119,7 @@ Never issue an open-ended `FETCH 1:*` on folders with thousands of messages. Ins
 
 ## 5. Streaming vs In-Memory Buffering
 
-When converting large mailboxes (e.g., 50 GB MBOX $\rightarrow$ PST), loading the entire mailbox into RAM results in out-of-memory (OOM) crashes.
+When converting large mailboxes (e.g., 50 GB MBOX → PST), loading the entire mailbox into RAM results in out-of-memory (OOM) crashes.
 
 * **Stream Ingestion:** Read MBOX line-by-line using a streaming buffer. Split messages at `^From ` envelope separators.
 * **Direct Disk Flush:** Write message nodes to the target format (PST/Maildir) and flush buffers periodically.
@@ -129,7 +129,7 @@ When converting large mailboxes (e.g., 50 GB MBOX $\rightarrow$ PST), loading th
 
 ## 6. Server-to-Server Streaming (Zero Local Storage)
 
-When migrating directly between two cloud providers (e.g. Gmail $\rightarrow$ Fastmail or Rogers $\rightarrow$ Microsoft 365), avoid saving intermediate files to disk:
+When migrating directly between two cloud providers (e.g. Gmail → Fastmail or Rogers → Microsoft 365), avoid saving intermediate files to disk:
 
 ```mermaid
 sequenceDiagram

@@ -49,7 +49,7 @@ Rogers Communications does not host its own independent email servers. All `@rog
 ### Generating an App Password for Rogers Mail
 Standard webmail passwords cannot be used with external IMAP clients. An App Password is required:
 1. Go to the **Rogers Member Centre** (`rogersmembercentre.com`) or log in via `mail.rogers.com`.
-2. Navigate to **Account Security** $\rightarrow$ **Generate App Password** (or **External Connections**).
+2. Navigate to **Account Security** → **Generate App Password** (or **External Connections**).
 3. Select an application name (e.g., `Mail Migration`) and copy the generated 16-character string.
 4. Use this string as the IMAP password.
 
@@ -65,7 +65,7 @@ While `export.imap.mail.yahoo.com` removes the 10k message ceiling, it is guarde
 ### Rule 1: Strictly 1 Concurrent Connection (`concurrency = 1`)
 Do not run multi-threaded workers against `export.imap.mail.yahoo.com`.
 * Standard IMAP allows up to 5 concurrent sockets.
-* The `export` endpoint is strictly tuned for single-threaded sequential streaming. Opening $\ge 2$ connections triggers session aborts.
+* The `export` endpoint is strictly tuned for single-threaded sequential streaming. Opening >= 2 connections triggers session aborts.
 
 ### Rule 2: Discrete UID Paging (50 to 100 Messages per Batch)
 Never execute an unbounded fetch (such as `FETCH 1:* (RFC822)`). Query UIDs in batches:
@@ -88,36 +88,26 @@ Introduce a brief programmatic pause between batch queries:
 mail2rust imap \
   --host export.imap.mail.yahoo.com \
   --port 993 \
-  --user "john.doe@rogers.com" \
+  --username "john.doe@rogers.com" \
   --password "abcd-efgh-ijkl-mnop" \
-  --concurrency 1 \
-  --batch-size 50 \
-  --pacing-ms 200 \
-  --out rogers_export.pst
+  --output rogers_export.pst \
+  --checkpoint rogers_sync.json
 ```
 
-### Example B: Server-to-Server Transfer (Rogers $\rightarrow$ Fastmail)
+### Example B: Server-to-Server Transfer (Rogers → Fastmail)
 ```bash
 mail2rust imap-sync \
   --src-host export.imap.mail.yahoo.com \
   --src-user "john.doe@rogers.com" \
   --src-pass "abcd-efgh-ijkl-mnop" \
-  --src-concurrency 1 \
   --dst-host imap.fastmail.com \
   --dst-user "john.doe@fastmail.com" \
-  --dst-pass "fmu1-xxxx-xxxx" \
-  --dst-concurrency 4
+  --dst-pass "fmu1-xxxx-xxxx"
 ```
 
-### Example C: Ingestion with `mail2mail`
-```bash
-python mail2mail.py imap \
-  --host export.imap.mail.yahoo.com \
-  --user "j_smith@yahoo.com" \
-  --password "abcd-efgh-ijkl-mnop" \
-  --concurrency 1 \
-  --out yahoo_dump.mbox
-```
+### Example C: Note on `mail2mail` & Live Network Exports
+> [!NOTE]
+> Live IMAP ingestion (`imap` and `imap-sync`) is provided natively by **`mail2rust imap`**, while **`mail2mail`** provides RFC 8620/8621 JMAP ingestion via `python mail2mail.py jmap` and converts exported local archives (e.g., Yahoo Privacy `.mbox` / `.zip` exports) via `python mail2mail.py pst yahoo_export.mbox yahoo_archive.pst`.
 
 ---
 
@@ -126,8 +116,8 @@ python mail2mail.py imap \
 If network policies or transient server issues prevent connecting to `export.imap.mail.yahoo.com`:
 
 1. **Yahoo Privacy Data Download (`privacy.yahoo.com`):**
-   * Select **"Request a copy of your data"** $\rightarrow$ **"Yahoo Mail"**.
+   * Select **"Request a copy of your data"** → **"Yahoo Mail"**.
    * Yahoo compiles a complete, untruncated mailbox archive available for browser download.
 2. **Webmail Folder Partitioning:**
-   * Create year-based folders in Yahoo webmail (`Inbox_2023`, `Inbox_2022`, etc.) and move emails so each folder holds $<10,000$ messages.
+   * Create year-based folders in Yahoo webmail (`Inbox_2023`, `Inbox_2022`, etc.) and move emails so each folder holds < 10,000 messages.
    * Standard IMAP can then fetch all messages without hitting the per-folder ceiling.

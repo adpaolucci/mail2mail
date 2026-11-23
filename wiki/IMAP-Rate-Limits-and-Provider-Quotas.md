@@ -56,7 +56,7 @@ This guide provides technical specifications for throttling mechanisms and error
   NO [LIMIT] CAPABILITY Rate limit hit. Please try again later.
   NO [UNAVAILABLE] Service temporarily unavailable.
   ```
-* **Dedicated Solution:** See [[Yahoo-and-Rogers-Export-Endpoints]] for the `export.imap.mail.yahoo.com` migration gateway.
+* **Dedicated Solution:** See [Yahoo & Rogers Export Endpoints](Yahoo-and-Rogers-Export-Endpoints) for the `export.imap.mail.yahoo.com` migration gateway.
 
 ---
 
@@ -87,13 +87,13 @@ When engineering migration clients (such as `mail2rust` or `mail2mail`), softwar
 | Server Response Substring | Classification | Action Required |
 | :--- | :--- | :--- |
 | `[ALERT] Account exceeded bandwidth limits` | Hard Quota Breach | Halt migration immediately. Do not retry for at least 6 hours (retrying resets the 24h timer). Switch to Google Takeout or REST API. |
-| `NO [LIMIT]` / `Server Busy` | Transient Rate Throttling | Apply exponential backoff with jitter: sleep $2^n + \text{rand}(1, 5)$ seconds. Reduce batch size to 25. |
+| `NO [LIMIT]` / `Server Busy` | Transient Rate Throttling | Apply exponential backoff with jitter: sleep `2^n + rand(1, 5)` seconds. Reduce batch size to 25. |
 | `BYE Connection closed` / `421` | Socket Reset / Concurrency Drop | Reduce max concurrent worker threads to 1 or 2. Re-authenticate after a 10-second cool-down. |
 | `NO [UNAVAILABLE]` / `Temporary failure` | Backend Load Shedding | Retry item after 5 seconds; log failed UID to retry queue. |
 
 ---
 
 ## 4. Next Steps
-* Learn how to bypass the 10,000-message ceiling on Yahoo and Rogers accounts: [[Yahoo-and-Rogers-Export-Endpoints]]
-* Explore modern API and bulk-archive alternatives that bypass IMAP limits: [[Alternative-Export-Pathways]]
-* Review client-side tuning and backoff algorithms: [[Migration-Best-Practices-and-Tuning]]
+* Learn how to bypass the 10,000-message ceiling on Yahoo and Rogers accounts: [Yahoo & Rogers Export Endpoints](Yahoo-and-Rogers-Export-Endpoints)
+* Explore modern API and bulk-archive alternatives that bypass IMAP limits: [Alternative Export Pathways](Alternative-Export-Pathways)
+* Review client-side tuning and backoff algorithms: [Migration Best Practices & Tuning](Migration-Best-Practices-and-Tuning)

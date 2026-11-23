@@ -119,16 +119,21 @@ Extracting emails over JMAP involves two core method calls:
 
 ---
 
-## 4. JMAP Implementation in `mail2mail`
+## 4. JMAP Implementation in `mail2rust` & `mail2mail`
 
-The repository includes a production-ready, pure-Python JMAP client (`mail2jmap.py`):
+Both toolchains include production-ready JMAP clients (`mail2rust jmap` in pure Rust and `mail2jmap.py` in pure Python):
 
 ```bash
-# Export entire Fastmail account to structured JMAP JSON
+# Direct JMAP ingestion to Outlook PST in pure Rust (zero Outlook required)
+mail2rust jmap \
+  --token "fmu1-xxxx-xxxx-xxxx" \
+  -o fastmail.pst
+
+# Export entire Fastmail account to structured JMAP JSON with mail2mail
 python mail2mail.py jmap \
   --token "fmu1-xxxx-xxxx-xxxx" \
   --out fastmail_dump.jmap.json
 
 # Convert JMAP JSON into a standard Outlook PST
-python mail2mail.py convert fastmail_dump.jmap.json fastmail.pst
+python mail2mail.py pst fastmail_dump.jmap.json fastmail.pst
 ```

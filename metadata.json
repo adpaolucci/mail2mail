@@ -1,0 +1,24 @@
+{
+  "name": "mail2mail",
+  "version": "2.3.0",
+  "description": "Universal Python 3.9+ email and mailbox migration toolkit (MBOX, Maildir, EML, EMLX, MSG, OLM, PST, MH, MMDF, Babyl, JMAP RFC 8620/8621, native OS file pickers, and 5-tool MCP server).",
+  "repository": "https://github.com/adpaolucci/mail2mail",
+  "homepage": "https://mail2mail.guap.ca",
+  "license": "MIT",
+  "binaries": [
+    "mail2mail",
+    "mail2pst",
+    "mail2eml",
+    "mail2mbox",
+    "mail2jmap",
+    "mail2mcp"
+  ],
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "15+ email & mailbox archive formats (MBOX, Maildir, EML, EMLX, MSG, OLM, PST, MH, MMDF, Babyl)",
+    "Hardened Outlook MAPI COM PST router with size/year/N-way volume splitting",
+    "RFC 8620/8621 JMAP client (Fastmail) & SQLite WAL incremental delta sync",
+    "Forensic SHA-256 chain-of-custody CSV/JSONL manifests & Bates stamping",
+    "5-tool JSON-RPC 2.0 stdio MCP server & native OS file/folder pickers"
+  ]
+}
