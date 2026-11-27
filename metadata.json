@@ -3,7 +3,7 @@
   "version": "2.3.0",
   "description": "Universal Python 3.9+ email and mailbox migration toolkit (MBOX, Maildir, EML, EMLX, MSG, OLM, PST, MH, MMDF, Babyl, JMAP RFC 8620/8621, native OS file pickers, and 5-tool MCP server).",
   "repository": "https://github.com/adpaolucci/mail2mail",
-  "homepage": "https://mail2mail.guap.ca",
+  "homepage": "https://guap.ca/mail2mail/",
   "license": "MIT",
   "binaries": [
     "mail2mail",
@@ -20,5 +20,33 @@
     "RFC 8620/8621 JMAP client (Fastmail) & SQLite WAL incremental delta sync",
     "Forensic SHA-256 chain-of-custody CSV/JSONL manifests & Bates stamping",
     "5-tool JSON-RPC 2.0 stdio MCP server & native OS file/folder pickers"
+  ],
+  "mcp_tools_count": 5,
+  "tools": [
+    {
+      "id": "mail2mail_info",
+      "readOnly": true,
+      "summary": "Inspect system environment, Python version, platform, Outlook COM availability, and supported formats."
+    },
+    {
+      "id": "mail2mail_sniff",
+      "readOnly": true,
+      "summary": "Inspect magic bytes and classify mailbox format (PST, MSG, MBOX, EML, EMLX, OLM, Maildir, Thunderbird, etc.)."
+    },
+    {
+      "id": "mail2mail_convert",
+      "readOnly": false,
+      "summary": "Convert mailbox between formats (EML, MBOX, PST) with optional deduplication and date filtering."
+    },
+    {
+      "id": "mail2mail_audit",
+      "readOnly": true,
+      "summary": "Forensic audit: computes cryptographic SHA-256 item hashes, Bates numbering, and CSV manifest."
+    },
+    {
+      "id": "mail2mail_split",
+      "readOnly": false,
+      "summary": "Split large mailbox into volume chunks by size or year while preserving folder hierarchies."
+    }
   ]
 }
