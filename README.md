@@ -4,7 +4,7 @@
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB.svg)](pyproject.toml)
 [![RFC Compliant](https://img.shields.io/badge/RFC-5322%20%7C%202045--2047%20%7C%203501%20%7C%204155%20%7C%208620--8621-success.svg)](docs/rfc_compliance/README.md)
 
-**Website:** [mail2mail.guap.ca](https://mail2mail.guap.ca) &bull; **Wiki:** [Mailbox Migration & Protocol Engineering Wiki](https://github.com/adpaolucci/mail2mail/wiki)
+**Website:** [guap.ca/mail2mail/](https://guap.ca/mail2mail/) &bull; **Wiki:** [Mailbox Migration & Protocol Engineering Wiki](https://github.com/adpaolucci/mail2mail/wiki)
 
 Convert between **MBOX**, **Thunderbird `ImapMail` / `Mail`** (mbox and Maildir modes), **Maildir / Maildir++**, **Apple Mail (`.emlx` / `.mbox` bundles)**, **Outlook `.msg`**, **Outlook for Mac `.olm`**, **Outlook `.pst`**, **MH / Sylpheed / Claws Mail**, **MMDF**, **Emacs Babyl**, **`.eml` trees**, **JMAP (RFC 8620/8621)**, and **compressed archives (`.gz`, `.bz2`, `.xz`, `.zip`, `.tar.gz`, `.tgz`)** into `.eml` folder hierarchies (`mail2eml`), standard `mboxrd` `.mbox` / `.mbox.gz` files (`mail2mbox`), or Microsoft Outlook **.pst** archives (`mail2pst`) with full folder hierarchy preservation, message flag mapping, size/year splitting, and resilient Outlook MAPI integration.
 

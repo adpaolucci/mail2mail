@@ -3,7 +3,7 @@
 Welcome to the **Mailbox Migration & Protocol Engineering Wiki** for [`mail2mail`](https://github.com/adpaolucci/mail2mail) (and its pure-Rust companion [`mail2rust`](https://github.com/adpaolucci/mail2rust)). This knowledge base provides comprehensive technical documentation on email protocols, server-side throttling behaviors, public provider rate limits, dedicated export endpoints, forensic auditing, and internal binary specifications.
 
 - **Repository:** <https://github.com/adpaolucci/mail2mail>
-- **Ecosystem Hub:** <https://mail2mail.guap.ca> (part of the GUAP ecosystem)
+- **Ecosystem Hub:** <https://guap.ca/mail2mail/> (part of the GUAP ecosystem)
 - **Version & Runtime:** `mail2mail v2.3.0 | Python 3.9+ | Apache-2.0 / MIT`
 
 ---

@@ -56,7 +56,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://mail2mail.guap.ca"
+Homepage = "https://guap.ca/mail2mail/"
 Documentation = "https://github.com/adpaolucci/mail2mail/wiki"
 Repository = "https://github.com/adpaolucci/mail2mail"
 Issues = "https://github.com/adpaolucci/mail2mail/issues"
