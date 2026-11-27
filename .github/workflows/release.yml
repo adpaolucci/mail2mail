@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "[0-9][0-9][0-9][0-9].*"
+      - "[0-9][0-9][0-9][0-9]-*"
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag override (leave empty to auto-derive YYYY.MM.DD-<4-char-sha>)"
+        required: false
+        default: ""
+      draft:
+        description: "Draft release"
+        type: boolean
+        default: false
+      prerelease:
+        description: "Prerelease"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Verify Python Distribution
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify Test Suite
+        run: python -m unittest discover -s tests -v
+
+      - name: Build Source & Docs Bundle
+        run: |
+          mkdir -p dist/mail2mail-python
+          cp -r *.py pyproject.toml README.md LICENSE NOTICE CHANGELOG.md metadata.json mcp.json dist/mail2mail-python/
+          cp -r tests dist/mail2mail-python/
+          tar -czvf "dist/mail2mail-python.tar.gz" -C dist mail2mail-python
+          cd dist
+          python -m zipfile -c mail2mail-python.zip mail2mail-python
+          sha256sum mail2mail-python.tar.gz mail2mail-python.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Determine Tag Name
+        id: get_tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -n "${{ inputs.tag_name }}" ]; then
+              TAG="${{ inputs.tag_name }}"
+            else
+              TAG="$(date -u +%Y.%m.%d)-$(git rev-parse HEAD | cut -c1-4)"
+            fi
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          name: Mail2Mail ${{ steps.get_tag.outputs.tag }}
+          draft: ${{ github.event.inputs.draft || false }}
+          prerelease: ${{ github.event.inputs.prerelease || false }}
+          files: |
+            dist/mail2mail-python.tar.gz
+            dist/mail2mail-python.zip
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
