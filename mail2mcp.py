@@ -398,6 +398,7 @@ def get_tools_manifest() -> List[Dict[str, Any]]:
         {
             "name": "mail2mail_info",
             "description": "Inspect system environment, Python version, platform, Outlook COM availability, and supported formats.",
+            "annotations": {"readOnlyHint": True, "destructiveHint": False},
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -406,6 +407,7 @@ def get_tools_manifest() -> List[Dict[str, Any]]:
         {
             "name": "mail2mail_sniff",
             "description": "Inspect magic bytes and classify mailbox format (PST, MSG, MBOX, EML, EMLX, OLM, Maildir, Thunderbird, etc.).",
+            "annotations": {"readOnlyHint": True, "destructiveHint": False},
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -417,6 +419,7 @@ def get_tools_manifest() -> List[Dict[str, Any]]:
         {
             "name": "mail2mail_convert",
             "description": "Convert mailbox between formats (EML, MBOX, PST) with optional deduplication and date filtering.",
+            "annotations": {"readOnlyHint": False, "destructiveHint": False},
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -434,6 +437,7 @@ def get_tools_manifest() -> List[Dict[str, Any]]:
         {
             "name": "mail2mail_audit",
             "description": "Forensic audit: computes cryptographic SHA-256 item hashes, Bates numbering, and CSV manifest.",
+            "annotations": {"readOnlyHint": True, "destructiveHint": False},
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -449,6 +453,7 @@ def get_tools_manifest() -> List[Dict[str, Any]]:
         {
             "name": "mail2mail_split",
             "description": "Split large mailbox into volume chunks by size or year while preserving folder hierarchies.",
+            "annotations": {"readOnlyHint": False, "destructiveHint": False},
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -494,9 +499,29 @@ def handle_jsonrpc(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": get_tools_manifest()}}
 
     if method == "tools/call":
-        params = req.get("params") or {}
+        raw_params = req.get("params")
+        if raw_params is not None and not isinstance(raw_params, dict):
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32602, "message": "Invalid params: params must be a JSON object"},
+            }
+        params = raw_params or {}
         name = params.get("name")
-        args = params.get("arguments") or {}
+        if not isinstance(name, str) or not name.strip():
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32602, "message": "Invalid params: missing tool 'name'"},
+            }
+        raw_args = params.get("arguments")
+        if raw_args is not None and not isinstance(raw_args, dict):
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32602, "message": "Invalid params: arguments must be a JSON object"},
+            }
+        args = raw_args or {}
 
         try:
             if name == "mail2mail_info":

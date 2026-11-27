@@ -34,6 +34,14 @@ class TestMail2Mcp(unittest.TestCase):
         for t in tools:
             self.assertIn("inputSchema", t)
             self.assertEqual(t["inputSchema"]["type"], "object")
+            self.assertIn("annotations", t)
+            self.assertIsInstance(t["annotations"]["readOnlyHint"], bool)
+            self.assertFalse(t["annotations"]["destructiveHint"])
+
+        ro_count = sum(1 for t in tools if t["annotations"]["readOnlyHint"] is True)
+        mut_count = sum(1 for t in tools if t["annotations"]["readOnlyHint"] is False)
+        self.assertEqual(ro_count, 3)
+        self.assertEqual(mut_count, 2)
 
     def test_system_info(self):
         info = mail2mcp.get_system_info()
@@ -140,6 +148,29 @@ class TestMail2Mcp(unittest.TestCase):
         resp = mail2mcp.handle_jsonrpc(req)
         self.assertIsNotNone(resp)
         self.assertEqual(resp["error"]["code"], -32601)
+
+    def test_handle_jsonrpc_invalid_arguments_and_unknown_tool(self):
+        bad_args_resp = mail2mcp.handle_jsonrpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 100,
+                "method": "tools/call",
+                "params": {"name": "mail2mail_info", "arguments": "not_object"},
+            }
+        )
+        self.assertIsNotNone(bad_args_resp)
+        self.assertEqual(bad_args_resp["error"]["code"], -32602)
+
+        unknown_tool_resp = mail2mcp.handle_jsonrpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 101,
+                "method": "tools/call",
+                "params": {"name": "__nonexistent_mail2mail_tool", "arguments": {}},
+            }
+        )
+        self.assertIsNotNone(unknown_tool_resp)
+        self.assertEqual(unknown_tool_resp["error"]["code"], -32601)
 
     def test_cli_subcommand_mcp_tools(self):
         script = os.path.join(os.path.dirname(__file__), "..", "mail2mail.py")
