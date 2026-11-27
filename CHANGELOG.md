@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **Sample PST fixtures are now documented honestly.** The three files in `samples/pst/` are
+  synthetic containers from an early `mail2rust` prototype; they are not readable by Outlook,
+  `scanpst.exe` or libpff. `samples/README.md` previously described them as "verified,
+  production-compliant" PSTs and used `mail2rust` command names throughout. Both are corrected,
+  and `samples/pst/README.md` explains how to produce a genuine PST through Outlook.
+- **`requirements.txt` now carries the platform marker and an explanation.** `pywin32` is
+  Windows-only and only required for the PST path; the marker matches `pyproject.toml` so
+  `pip install -r requirements.txt` no longer attempts to build `pywin32` on Linux or macOS.
+
+---
+
 ## [2.3.0] - 2026-11-08
 
 ### Added

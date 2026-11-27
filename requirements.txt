@@ -1,1 +1,11 @@
-pywin32>=306
+# Runtime dependencies for mail2mail.
+#
+# pywin32 is only needed on Windows, and only for the PST path (mail2pst, or any
+# conversion whose source or destination is .pst/.ost). It is the bridge to
+# Outlook's MAPI interface; classic Outlook desktop must also be installed.
+# The pyproject.toml marker (`sys_platform == 'win32'`) makes this conditional on
+# `pip install .`; this file is the flat equivalent for `pip install -r`.
+#
+# All other conversions (EML, MBOX, Maildir, EMLX, MSG, OLM, MH, MMDF, Babyl,
+# JMAP, archives) use only the Python standard library.
+pywin32>=306; sys_platform == "win32"

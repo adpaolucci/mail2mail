@@ -384,7 +384,7 @@ Add to `claude_desktop_config.json` or `.cursor/mcp.json`:
 }
 ```
 
-> **Note on PST Export**: PST creation in `mail2mail` requires Microsoft Outlook on Windows via `pywin32` COM. For headless cloud VMs or cross-platform (Linux/macOS) native MS-PST binary generation with zero Outlook dependency, see our companion project [**`mail2rust`**](https://github.com/adpaolucci/mail2rust).
+> **Note on PST Export**: PST creation in `mail2mail` requires Microsoft Outlook on Windows via `pywin32` COM. For headless cloud VMs or cross-platform (Linux/macOS) native PST generation without installing Outlook, see our companion project [**`mail2rust`**](https://github.com/adpaolucci/mail2rust) — but check its PST interoperability status before relying on the output in Outlook; `mail2mail` remains the reliable path when Outlook is available.
 
 ---
 
