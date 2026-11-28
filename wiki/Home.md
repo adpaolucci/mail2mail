@@ -4,7 +4,7 @@ Welcome to the **Mailbox Migration & Protocol Engineering Wiki** for [`mail2mail
 
 - **Repository:** <https://github.com/adpaolucci/mail2mail>
 - **Ecosystem Hub:** <https://guap.ca/mail2mail/> (part of the GUAP ecosystem)
-- **Version & Runtime:** `mail2mail v2.3.0 | Python 3.9+ | Apache-2.0 / MIT`
+- **Version & Runtime:** `mail2mail v2.3.0 | Python 3.9+ | MIT`
 
 ---
 
